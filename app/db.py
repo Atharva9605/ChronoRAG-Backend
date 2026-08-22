@@ -50,6 +50,7 @@ def qdrant():
         _qdrant = QdrantClient(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
+            timeout=60.0,
         )
     return _qdrant
 
