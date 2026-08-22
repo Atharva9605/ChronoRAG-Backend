@@ -1,7 +1,8 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
+
 
 
 class Settings(BaseSettings):
@@ -22,6 +23,8 @@ class Settings(BaseSettings):
     neo4j_uri: str
     neo4j_user: str
     neo4j_password: str
+    qdrant_url: str
+    qdrant_api_key: str | None = None
 
     # Pipeline
     concurrency: int = 5

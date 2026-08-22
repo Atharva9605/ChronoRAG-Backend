@@ -1,10 +1,12 @@
 import time
+import uuid
 
-from pgvector.psycopg import Vector
+from qdrant_client.http import models
 
 from . import llm
 from .config import settings
 from .db import pg
+from . import db
 from .ingest import naive_chunks
 from .schemas import Citation, PipelineAnswer
 
@@ -28,19 +30,44 @@ def build(doc_id: str, pages: list[str], on_progress=None) -> int:
     with pg() as cur:
         cur.execute("DELETE FROM naive_chunks WHERE doc_id = %s", (doc_id,))
 
+    # Also delete from Qdrant
+    db.qdrant().delete(
+        collection_name="naive_chunks",
+        points_selector=models.FilterSelector(
+            filter=models.Filter(
+                must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
+            )
+        )
+    )
+
     batch = 64
     for i in range(0, total, batch):
         part = chunks[i:i + batch]
         vectors = llm.embed([c["content"] for c in part])
+        
+        points = []
+        for c, v in zip(part, vectors):
+            points.append(models.PointStruct(
+                id=uuid.uuid4().hex,
+                vector=v,
+                payload={
+                    "doc_id": doc_id,
+                    "chunk_index": c["chunk_index"],
+                    "page_start": c["page_start"],
+                    "page_end": c["page_end"],
+                    "content": c["content"],
+                }
+            ))
+        db.qdrant().upsert(collection_name="naive_chunks", points=points)
+
         with pg() as cur:
             cur.executemany(
                 """INSERT INTO naive_chunks
-                   (doc_id, chunk_index, page_start, page_end, content, embedding)
-                   VALUES (%s,%s,%s,%s,%s,%s)""",
+                   (doc_id, chunk_index, page_start, page_end, content)
+                   VALUES (%s,%s,%s,%s,%s)""",
                 [
-                    (doc_id, c["chunk_index"], c["page_start"], c["page_end"],
-                     c["content"], Vector(v))
-                    for c, v in zip(part, vectors)
+                    (doc_id, c["chunk_index"], c["page_start"], c["page_end"], c["content"])
+                    for c in part
                 ],
             )
         if on_progress:
@@ -52,17 +79,24 @@ def build(doc_id: str, pages: list[str], on_progress=None) -> int:
 def retrieve(doc_id: str, question: str, k: int | None = None) -> list[dict]:
     k = k or settings.naive_top_k
     qvec = llm.embed([question])[0]
-    with pg() as cur:
-        cur.execute(
-            """SELECT chunk_index, page_start, page_end, content,
-                      1 - (embedding <=> %s) AS score
-               FROM naive_chunks
-               WHERE doc_id = %s
-               ORDER BY embedding <=> %s
-               LIMIT %s""",
-            (Vector(qvec), doc_id, Vector(qvec), k),
-        )
-        return [dict(r) for r in cur.fetchall()]
+    hits = db.qdrant().search(
+        collection_name="naive_chunks",
+        query_vector=qvec,
+        query_filter=models.Filter(
+            must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
+        ),
+        limit=k,
+    )
+    return [
+        {
+            "chunk_index": h.payload["chunk_index"],
+            "page_start": h.payload["page_start"],
+            "page_end": h.payload["page_end"],
+            "content": h.payload["content"],
+            "score": h.score,
+        }
+        for h in hits
+    ]
 
 
 def answer(doc_id: str, question: str) -> PipelineAnswer:

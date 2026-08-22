@@ -23,17 +23,28 @@ Rules:
 
 def search_events(doc_id: str, text: str, k: int = 12) -> list[dict]:
     vec = llm.embed([text])[0]
-    with pg() as cur:
-        cur.execute(
-            """SELECT id, event_name, category, timeline_anchor, stage_order, location,
-                      characters, core_event, antecedent_cause, consequent_effect,
-                      source_pages, first_page,
-                      1 - (embedding <=> %s) AS score
-               FROM events WHERE doc_id = %s
-               ORDER BY embedding <=> %s LIMIT %s""",
-            (Vector(vec), doc_id, Vector(vec), k),
-        )
-        return [dict(r) for r in cur.fetchall()]
+    
+    from qdrant_client.http import models
+    from . import db
+    hits = db.qdrant().search(
+        collection_name="events",
+        query_vector=vec,
+        query_filter=models.Filter(
+            must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
+        ),
+        limit=k,
+    )
+    
+    if not hits:
+        return []
+        
+    ids = [h.payload["id"] for h in hits]
+    
+    # We want to preserve the order of the hits from Qdrant, so we reorder the results
+    rows = _by_ids(doc_id, ids)
+    by_id = {r["id"]: r for r in rows}
+    
+    return [by_id[i] for i in ids if i in by_id]
 
 
 def _by_ids(doc_id: str, ids: list[str]) -> list[dict]:

@@ -292,20 +292,47 @@ def persist_events(doc_id: str, events: list[dict], on_progress=None) -> None:
             on_progress(min(1.0, (i + 64) / max(1, len(texts))),
                         f"embedding events {min(i + 64, len(texts))}/{len(texts)}")
 
+    # Delete from Qdrant first
+    from qdrant_client.http import models
+    from . import db
+    db.qdrant().delete(
+        collection_name="events",
+        points_selector=models.FilterSelector(
+            filter=models.Filter(
+                must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
+            )
+        )
+    )
+
+    # Upsert to Qdrant
+    points = []
+    for e, v in zip(events, vectors):
+        points.append(models.PointStruct(
+            id=uuid.uuid4().hex,
+            vector=v,
+            payload={
+                "id": e["id"],
+                "doc_id": doc_id,
+            }
+        ))
+    if points:
+        for i in range(0, len(points), 64):
+            db.qdrant().upsert(collection_name="events", points=points[i:i + 64])
+
     with pg() as cur:
         cur.execute("DELETE FROM events WHERE doc_id = %s", (doc_id,))
         cur.executemany(
             """INSERT INTO events
                (id, doc_id, event_name, category, timeline_anchor, stage_order,
                 location, characters, core_event, antecedent_cause, consequent_effect,
-                source_pages, first_page, merge_count, embedding)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                source_pages, first_page, merge_count)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             [
                 (e["id"], doc_id, e["event_name"], e["category"], e["timeline_anchor"],
                  e["stage_order"], e["location"], e["characters"], e["core_event"],
                  e["antecedent_cause"], e["consequent_effect"], e["source_pages"],
-                 e["first_page"], e["merge_count"], Vector(v))
-                for e, v in zip(events, vectors)
+                 e["first_page"], e["merge_count"])
+                for e in events
             ],
         )
 

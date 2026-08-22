@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS vector;
-
 -- ============================================================
 -- Shared: documents
 -- ============================================================
@@ -27,13 +25,10 @@ CREATE TABLE IF NOT EXISTS naive_chunks (
     chunk_index   INT  NOT NULL,
     page_start    INT  NOT NULL,
     page_end      INT  NOT NULL,
-    content       TEXT NOT NULL,
-    embedding     vector(1536)
+    content       TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS naive_chunks_doc_idx ON naive_chunks (doc_id);
-CREATE INDEX IF NOT EXISTS naive_chunks_vec_idx
-    ON naive_chunks USING hnsw (embedding vector_cosine_ops);
 
 -- ============================================================
 -- PART B: extracted timeline events
@@ -52,14 +47,11 @@ CREATE TABLE IF NOT EXISTS events (
     consequent_effect  TEXT NOT NULL DEFAULT '',
     source_pages       INT[] NOT NULL DEFAULT '{}',
     first_page         INT  NOT NULL DEFAULT 0,
-    merge_count        INT  NOT NULL DEFAULT 1,
-    embedding          vector(1536)
+    merge_count        INT  NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS events_doc_idx   ON events (doc_id);
 CREATE INDEX IF NOT EXISTS events_order_idx ON events (doc_id, stage_order, first_page);
-CREATE INDEX IF NOT EXISTS events_vec_idx
-    ON events USING hnsw (embedding vector_cosine_ops);
 
 -- Raw pass-1 observations, kept for auditability and the "show your work" panel
 CREATE TABLE IF NOT EXISTS observations (

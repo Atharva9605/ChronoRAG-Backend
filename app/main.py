@@ -14,8 +14,11 @@ from .schemas import CompareResponse, DocumentOut, EventOut, JobOut
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize connection pools, verify models, etc.
     db.pool()
+    db.neo4j()
     db.init_neo4j()
+    db.init_qdrant()
     yield
     db.close()
 
