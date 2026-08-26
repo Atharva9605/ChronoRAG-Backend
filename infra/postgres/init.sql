@@ -43,8 +43,8 @@ CREATE TABLE IF NOT EXISTS events (
     doc_id             TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     event_name         TEXT NOT NULL,
     category           TEXT NOT NULL CHECK (category IN ('major','minor')),
-    timeline_anchor    TEXT NOT NULL,
-    stage_order        INT  NOT NULL,
+    chronological_clue TEXT NOT NULL DEFAULT '',
+    topological_order  INT  NOT NULL DEFAULT 0,
     location           TEXT NOT NULL DEFAULT '',
     characters         TEXT[] NOT NULL DEFAULT '{}',
     core_event         TEXT NOT NULL,
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_doc_idx   ON events (doc_id);
-CREATE INDEX IF NOT EXISTS events_order_idx ON events (doc_id, stage_order, first_page);
+CREATE INDEX IF NOT EXISTS events_order_idx ON events (doc_id, topological_order, first_page);
 CREATE INDEX IF NOT EXISTS events_vec_idx
     ON events USING hnsw (embedding vector_cosine_ops);
 

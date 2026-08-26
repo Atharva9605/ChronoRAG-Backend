@@ -25,7 +25,7 @@ def search_events(doc_id: str, text: str, k: int = 12) -> list[dict]:
     vec = llm.embed([text])[0]
     with pg() as cur:
         cur.execute(
-            """SELECT id, event_name, category, timeline_anchor, stage_order, location,
+            """SELECT id, event_name, category, chronological_clue, topological_order, location,
                       characters, core_event, antecedent_cause, consequent_effect,
                       source_pages, first_page,
                       1 - (embedding <=> %s) AS score
@@ -41,7 +41,7 @@ def _by_ids(doc_id: str, ids: list[str]) -> list[dict]:
         return []
     with pg() as cur:
         cur.execute(
-            """SELECT id, event_name, category, timeline_anchor, stage_order, location,
+            """SELECT id, event_name, category, chronological_clue, topological_order, location,
                       characters, core_event, antecedent_cause, consequent_effect,
                       source_pages, first_page
                FROM events WHERE doc_id = %s AND id = ANY(%s)""",
@@ -75,9 +75,9 @@ def answer(doc_id: str, question: str, k: int = 12) -> PipelineAnswer:
 
     pool = seeds + extra
 
-    # 3. deterministic ordering — the graph decides, not the model
-    pool.sort(key=lambda e: (e["stage_order"], e["first_page"], e["event_name"]))
-    trace.append("Sorted the working set by story stage then source page "
+    # 3. deterministic ordering - the graph decides, not the model
+    pool.sort(key=lambda e: (e.get("topological_order", 0), e["first_page"], e["event_name"]))
+    trace.append("Sorted the working set by topological order from the causal graph, "
                  "(transitive-closure order), NOT by similarity.")
 
     # 4. optional pairwise verification
@@ -93,14 +93,14 @@ def answer(doc_id: str, question: str, k: int = 12) -> PipelineAnswer:
     def _event_block(e: dict, i: int, *, slim: bool = False) -> str:
         if slim:
             return (
-                f"[{i + 1}] {e['event_name']} | {e['timeline_anchor']} | "
+                f"[{i + 1}] {e['event_name']} | {e.get('chronological_clue', 'no explicit time')} | "
                 f"{_fmt_pages(e['source_pages'])}\n"
                 f"{(e['core_event'] or '')[:160]}"
             )
         return (
             f"[{i + 1}] id={e['id']}\n"
             f"Event: {e['event_name']}\n"
-            f"Stage: {e['timeline_anchor']}\n"
+            f"Chronology: {e.get('chronological_clue', 'none')}\n"
             f"What: {(e['core_event'] or '')[:240]}\n"
             f"Source: {_fmt_pages(e['source_pages'])}"
         )

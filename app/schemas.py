@@ -8,12 +8,11 @@ from pydantic import BaseModel, Field
 # ============================================================
 class TimelineEvent(BaseModel):
     event_name: str = Field(description="Short descriptive name of the event")
-    timeline_anchor: str = Field(
-        description=(
-            "Exactly one of: 'Shore / Setup', 'Out to Sea / The Hunt', "
-            "'Struggle with the Marlin', 'Return / The Sharks', "
-            "'Homecoming / Aftermath'"
-        )
+    chronological_clue: str = Field(
+        description="Any explicit time markers in the text (e.g., '1922', 'the next morning', 'after the war'). Leave empty if none."
+    )
+    category: Literal["major", "minor"] = Field(
+        description="major = drives the main plot; minor = subplot, backstory, atmosphere"
     )
     location: str = Field(description="Setting, formatted specific-to-general e.g. 'Kumaon Hostel, IIT Delhi'")
     characters_present: list[str] = Field(description="Names of characters involved")
@@ -23,19 +22,8 @@ class TimelineEvent(BaseModel):
     source_pages: list[int] = Field(description="PDF page numbers where this event appears")
 
 
-class MergeInstruction(BaseModel):
-    is_duplicate: bool = Field(description="True if this observation is an event already in the baseline index")
-    matched_event_name: str = Field(description="Exact baseline event_name if is_duplicate, else empty string")
-    category: Literal["major", "minor"] = Field(
-        description="major = drives the main plot; minor = subplot, backstory, atmosphere"
-    )
-    inferred_event: TimelineEvent
-
-
-class BatchMergeResponse(BaseModel):
-    instructions: list[MergeInstruction] = Field(
-        description="One instruction per observation bullet, in order"
-    )
+class BatchExtractResponse(BaseModel):
+    events: list[TimelineEvent] = Field(description="List of extracted timeline events from the observations.")
 
 
 class GraphAnswer(BaseModel):
@@ -72,8 +60,8 @@ class EventOut(BaseModel):
     id: str
     event_name: str
     category: str
-    timeline_anchor: str
-    stage_order: int
+    chronological_clue: str
+    topological_order: int
     location: str
     characters: list[str]
     core_event: str

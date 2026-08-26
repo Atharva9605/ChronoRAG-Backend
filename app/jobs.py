@@ -98,17 +98,23 @@ def run_kaalkram(job_id: str, doc_id: str) -> None:
             on_progress=lambda p, msg: update(job_id, progress=0.45 + p * 0.35, stage=msg),
         )
 
-        # ---- Pass 3 + persist: 0.80 -> 0.93
+        # ---- Pass 3 + Graph: 0.80 -> 1.00
         update(job_id, stage="pass 3: ordering the story", progress=0.80)
         events = passes.run_pass3(events)
+        
+        update(job_id, stage="building event graph", progress=0.85)
+        edges, stats, topo_order = graph.build_edges(events)
+        
+        order_map = {id_: i for i, id_ in enumerate(topo_order)}
+        for e in events:
+            e["topological_order"] = order_map.get(e["id"], 0)
+            
+        update(job_id, stage="saving to database", progress=0.94)
         passes.persist_events(
             doc_id, events,
-            on_progress=lambda p, msg: update(job_id, progress=0.82 + p * 0.11, stage=msg),
+            on_progress=lambda p, msg: update(job_id, progress=0.94 + p * 0.05, stage=msg),
         )
-
-        # ---- Graph: 0.93 -> 1.00
-        update(job_id, stage="building event graph", progress=0.94)
-        edges, stats = graph.build_edges(events)
+        
         graph.push(doc_id, events, edges)
 
         majors = sum(1 for e in events if e["category"] == "major")

@@ -50,34 +50,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
-# Canonical story-stage taxonomy. stage_order drives chronological sorting.
-# Tuned for Hemingway's The Old Man and the Sea (swap for another book).
-TAXONOMY: list[str] = [
-    "Shore / Setup",
-    "Out to Sea / The Hunt",
-    "Struggle with the Marlin",
-    "Return / The Sharks",
-    "Homecoming / Aftermath",
-]
-STAGE_ORDER = {name: i for i, name in enumerate(TAXONOMY)}
-
-
-def stage_index(anchor: str) -> int:
-    """Map a free-text anchor onto the taxonomy, tolerating minor LLM drift."""
-    if anchor in STAGE_ORDER:
-        return STAGE_ORDER[anchor]
-    low = anchor.lower()
-    for name, idx in STAGE_ORDER.items():
-        if name.lower() in low or low in name.lower():
-            return idx
-    for key, idx in (
-        ("shore", 0), ("setup", 0), ("skiff", 0), ("manolin", 0), ("boy", 0),
-        ("hunt", 1), ("out to sea", 1), ("bait", 1), ("hook", 1),
-        ("marlin", 2), ("struggle", 2), ("fight", 2), ("line", 2),
-        ("shark", 3), ("return", 3), ("skeleton", 3), ("carcass", 3),
-        ("home", 4), ("aftermath", 4), ("tourist", 4), ("sleep", 4), ("dream", 4),
-    ):
-        if key in low:
-            return idx
-    return 1  # safe default: main story body

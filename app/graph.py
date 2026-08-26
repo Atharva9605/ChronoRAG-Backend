@@ -10,48 +10,44 @@ from .db import neo4j
 #   (b) causal links inferred by the LLM   -> lower confidence, may contradict (a)
 # Contradictions create cycles. We locate them with Tarjan's SCC and drop the
 # lowest-confidence edge in each cycle until the graph is a DAG.
-CONF_SEQUENTIAL = 0.9
-CONF_CAUSAL = 0.55
-CONF_STAGE = 0.95
-
+CONF_SEQUENTIAL = 0.3
+CONF_CAUSAL = 0.9
 
 def _causal_pairs(events: list[dict]) -> list[tuple[str, str, float]]:
-    """Link A -> B when A's consequent_effect echoes B's antecedent_cause."""
-    pairs: list[tuple[str, str, float]] = []
-    tokens = {
-        e["id"]: set(w for w in e["antecedent_cause"].lower().split() if len(w) > 4)
-        for e in events
-    }
+    """Use vector similarity + LLM to infer causal links."""
+    from . import llm
+    import numpy as np
+    def cosine_sim(a, b):
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    
+    pairs = []
     for a in events:
-        eff = set(w for w in a["consequent_effect"].lower().split() if len(w) > 4)
-        if not eff:
-            continue
         for b in events:
             if a["id"] == b["id"]:
                 continue
-            cause = tokens[b["id"]]
-            if not cause:
-                continue
-            overlap = len(eff & cause) / max(1, min(len(eff), len(cause)))
-            if overlap >= 0.5:
-                pairs.append((a["id"], b["id"], CONF_CAUSAL))
+            
+            sim = cosine_sim(a["embedding"], b["embedding"])
+            if sim > 0.65:
+                prompt = f"""Does Event A directly cause Event B?
+Event A: {a['event_name']} - {a['core_event']}
+Event B: {b['event_name']} - {b['core_event']}
+Output only YES or NO."""
+                resp = llm.chat("You are a causal reasoning engine.", prompt, max_tokens=10).strip().upper()
+                if "YES" in resp:
+                    pairs.append((a["id"], b["id"], CONF_CAUSAL))
     return pairs
 
-
-def build_edges(events: list[dict]) -> tuple[list[dict], dict]:
-    """Return (edges, repair_stats). Events must already be Pass-3 sorted."""
+def build_edges(events: list[dict]) -> tuple[list[dict], dict, list[str]]:
+    """Return (edges, repair_stats, topo_order)."""
     candidates: list[tuple[str, str, float, str]] = []
 
-    # (a) consecutive ordering chain
-    for a, b in zip(events, events[1:]):
-        conf = CONF_STAGE if a["stage_order"] < b["stage_order"] else CONF_SEQUENTIAL
-        candidates.append((a["id"], b["id"], conf, "sequence"))
+    ordered = sorted(events, key=lambda e: e["first_page"])
+    for a, b in zip(ordered, ordered[1:]):
+        candidates.append((a["id"], b["id"], CONF_SEQUENTIAL, "sequence"))
 
-    # (b) causal links
     for src, dst, conf in _causal_pairs(events):
         candidates.append((src, dst, conf, "causal"))
 
-    # ---- cycle repair ----
     g = nx.DiGraph()
     g.add_nodes_from(e["id"] for e in events)
     for src, dst, conf, kind in candidates:
@@ -77,26 +73,14 @@ def build_edges(events: list[dict]) -> tuple[list[dict], dict]:
             g.remove_edge(u, v)
             dropped += 1
 
-    # self-loops, just in case
     g.remove_edges_from(nx.selfloop_edges(g))
+    topo_order = list(nx.topological_sort(g))
 
     edges = [
-        {"src": u, "dst": v, "confidence": d["confidence"], "kind": d["kind"]}
+        {"source": u, "target": v, "confidence": d["confidence"], "kind": d["kind"]}
         for u, v, d in g.edges(data=True)
     ]
-    stats = {
-        "candidate_edges": len(candidates),
-        "final_edges": len(edges),
-        "dropped_edges": dropped,
-        "cycle_rate": round(dropped / max(1, len(candidates)), 4),
-        "is_dag": nx.is_directed_acyclic_graph(g),
-    }
-    return edges, stats
-
-
-# ------------------------------------------------------------
-# Neo4j write
-# ------------------------------------------------------------
+    return edges, {"cycles_repaired": dropped}, topo_order
 def push(doc_id: str, events: list[dict], edges: list[dict]) -> None:
     drv = neo4j()
     with drv.session() as sess:
