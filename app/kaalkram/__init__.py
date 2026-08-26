@@ -17,25 +17,16 @@ def build_timeline(
     """
     Main entrypoint to run the Kaalkram 2.0 pipeline:
     1. 10-page sliding window with 2-page overlap + rolling memory.
-    2. Zero-cost causal & temporal graph DAG construction.
-    3. Topological ordering via Kahn's algorithm.
-    4. PostgreSQL (pgvector) + Neo4j persistence.
-    5. JSON checkpoints saved to data/cache/.
+    2. Global LLM Chronological Timeline Ordering across all extracted events.
+    3. PostgreSQL (pgvector) + Neo4j persistence.
+    4. JSON checkpoints saved to data/cache/.
     """
     # 1. Extraction with Rolling Memory and Window Checkpoints
     events = extractor.extract_timeline_events(doc_id, pages, on_progress=on_progress)
     
-    if on_progress:
-        on_progress(0.85, "Constructing causal timeline graph and topological order")
-        
-    # 2. Graph Construction & Topological Sorting
-    edges, topo_order = graph.build_timeline_graph(events)
+    # 2. Global LLM Timeline Ordering (Arranges all events into true story chronology)
+    edges, topo_order = graph.order_timeline_with_llm(doc_id, events, on_progress=on_progress)
     
-    # Map topological order integer back to events
-    order_map = {node_id: rank for rank, node_id in enumerate(topo_order)}
-    for e in events:
-        e["topological_order"] = order_map.get(e["id"], 0)
-        
     if on_progress:
         on_progress(0.92, "Persisting timeline to PostgreSQL and Neo4j")
         

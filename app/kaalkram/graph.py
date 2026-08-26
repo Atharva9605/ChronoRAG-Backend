@@ -1,132 +1,132 @@
-from collections import defaultdict, deque
+import json
 import logging
+from typing import Callable
+
+from .. import llm
+from ..config import settings
 from ..db import neo4j
+from .schemas import GlobalTimelineOrderingResponse
 
 logger = logging.getLogger(__name__)
 
+ORDERING_SYSTEM_PROMPT = """You are an expert literary chronologist specializing in true narrative timeline ordering.
 
-def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
+You are given a comprehensive list of all events extracted from a book.
+Your task is to organize these events into their TRUE STORY-WORLD CHRONOLOGICAL ORDER (Fabula), not just the order they were printed on the page.
+
+CRITICAL CHRONOLOGY RULES:
+1. TRUE STORY-TIME VS BOOK PAGES:
+   - If an event is a flashback, character memory, or backstory occurring in the past (e.g. Santiago's youth voyages to Africa, his arm-wrestling match in Casablanca), it MUST be placed in the past BEFORE the present-day novella storyline starts.
+   - The present-day narrative (Day 1 at the Terrace -> Rowing out on Day 2 -> The 3-day battle with the marlin -> Shark attacks -> Return to shore) must flow in forward chronological sequence.
+2. STRICT UNIQUE RANKS:
+   - Assign every single event an exact integer `chronological_rank` starting at 1, 2, 3, ... up to N.
+   - Every event ID provided in the input MUST be included in the output.
+3. RATIONALE:
+   - For every event, provide a 1-sentence `chronological_rationale` explaining why it occurs at this position in true story time.
+"""
+
+
+def _save_json_checkpoint(filename: str, data: dict) -> None:
+    """Helper to save inspection checkpoints to cache directory."""
+    try:
+        cache_dir = settings.cache_path
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target_file = cache_dir / filename
+        target_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to write checkpoint {filename}: {e}")
+
+
+def order_timeline_with_llm(
+    doc_id: str,
+    events: list[dict],
+    on_progress: Callable[[float, str], None] | None = None,
+) -> tuple[list[dict], list[str]]:
     """
-    Constructs a clean, strictly acyclic Directed Acyclic Graph (DAG) for the story timeline.
-    Guarantees no circular dependencies (A happens before B AND B happens before A).
+    Feeds the full list of extracted events to the LLM to arrange them into
+    true story-world chronological sequence, replacing heuristic DAG logic.
     """
     if not events:
         return [], []
 
-    # Map events by id and chronological/narrative sequence index
-    id_map = {e["id"]: e for e in events}
-    event_index_map = {e["id"]: i for i, e in enumerate(events)}
-    name_map = {e["event_name"].lower().strip(): e["id"] for e in events}
+    if on_progress:
+        on_progress(0.85, "LLM arranging events into true chronological story order")
 
-    adj_graph = defaultdict(set)
-    edges: list[dict] = []
-
-    def can_add_edge(u: str, v: str) -> bool:
-        """Checks if adding edge u -> v would create a cycle or self-loop."""
-        if u == v:
-            return False
-        # If v can reach u, then adding u -> v creates a cycle
-        queue = deque([v])
-        visited = {v}
-        while queue:
-            curr = queue.popleft()
-            if curr == u:
-                return False
-            for nxt in adj_graph[curr]:
-                if nxt not in visited:
-                    visited.add(nxt)
-                    queue.append(nxt)
-        return True
-
-    def add_edge(src: str, dst: str, rel: str = "HAPPENS_BEFORE") -> bool:
-        if can_add_edge(src, dst) and dst not in adj_graph[src]:
-            adj_graph[src].add(dst)
-            edges.append({"src": src, "dst": dst, "rel": rel})
-            return True
-        return False
-
-    # 1. Separate forward narrative events from past flashbacks/backstories
-    story_events = [e for e in events if e.get("classification") == "story_progression"]
-    flashback_events = [e for e in events if e.get("classification") in ("flashback", "backstory")]
-
-    # 2. Chain flashbacks/backstories in the chronological past
-    if flashback_events:
-        for i in range(len(flashback_events) - 1):
-            add_edge(flashback_events[i]["id"], flashback_events[i + 1]["id"], "HAPPENS_BEFORE")
-        # Connect the last flashback into the start of the forward narrative
-        if story_events:
-            add_edge(flashback_events[-1]["id"], story_events[0]["id"], "HAPPENS_BEFORE")
-
-    # 3. Connect forward story progression sequentially
-    for i in range(len(story_events) - 1):
-        add_edge(story_events[i]["id"], story_events[i + 1]["id"], "HAPPENS_BEFORE")
-
-    # 4. Causal / Explicit cross-references
+    # Format all events for the LLM
+    event_blocks = []
     for e in events:
-        ref = (e.get("preceding_event_reference") or "").lower().strip()
-        if ref and ref not in ("none", "n/a", "null") and len(ref) > 6:
-            ref_words = set(ref.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
-            best_match_id = None
-            best_overlap = 0
+        actions_str = ""
+        if e.get("point_wise_actions"):
+            actions_str = " | Actions: " + "; ".join(
+                f"[p. {a['page_no']}] {a['action']}" for a in e["point_wise_actions"]
+            )
+        
+        block = (
+            f"- EVENT ID: {e['id']}\n"
+            f"  Name: {e['event_name']}\n"
+            f"  Classification: {e.get('classification', 'story_progression')}\n"
+            f"  Page Range: pp. {e['page_start']}-{e['page_end']}\n"
+            f"  Time Anchor: {e.get('temporal_anchor') or 'Not specified'}\n"
+            f"  Summary: {e['summary']}{actions_str}"
+        )
+        event_blocks.append(block)
 
-            for name, prior_id in name_map.items():
-                if prior_id == e["id"]:
-                    continue
-                # Only link forward
-                if event_index_map[prior_id] < event_index_map[e["id"]]:
-                    name_words = set(name.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
-                    overlap = len(ref_words & name_words)
-                    if overlap >= 2 and overlap > best_overlap:
-                        best_overlap = overlap
-                        best_match_id = prior_id
+    user_prompt = (
+        f"EXTRACTED EVENTS TO ORDER CHRONOLOGICALLY ({len(events)} total events):\n\n"
+        + "\n\n".join(event_blocks)
+        + "\n\nArrange all events above into their TRUE story-world chronological order from earliest to latest."
+    )
 
-            if best_match_id:
-                add_edge(best_match_id, e["id"], "CAUSES")
+    # Call LLM for global timeline ordering
+    ordering_result: GlobalTimelineOrderingResponse = llm.chat_structured(
+        system=ORDERING_SYSTEM_PROMPT,
+        user=user_prompt,
+        model_cls=GlobalTimelineOrderingResponse,
+        temperature=0.1,
+        max_tokens=4000,
+    )
 
-    # 4. Transitive Reduction: Remove direct edge (u -> v) if there is an alternate path
-    def has_alternate_path(start: str, target: str) -> bool:
-        queue = deque([nbr for nbr in adj_graph[start] if nbr != target])
-        visited = set(queue)
-        while queue:
-            curr = queue.popleft()
-            if curr == target:
-                return True
-            for nxt in adj_graph[curr]:
-                if nxt not in visited:
-                    visited.add(nxt)
-                    queue.append(nxt)
-        return False
+    # Save LLM ordering checkpoint to data/cache/
+    _save_json_checkpoint(
+        f"{doc_id}_checkpoint_global_llm_ordering.json",
+        ordering_result.model_dump(),
+    )
 
-    streamlined_edges = []
-    for edge in edges:
-        src, dst = edge["src"], edge["dst"]
-        if not has_alternate_path(src, dst):
-            streamlined_edges.append(edge)
+    # Map the LLM's chronological rank back to the events
+    rank_map = {}
+    for item in ordering_result.ordered_events:
+        rank_map[item.event_id] = {
+            "rank": item.chronological_rank,
+            "period": item.story_time_period,
+            "rationale": item.chronological_rationale,
+        }
 
-    # 5. Topological Sort (Kahn's Algorithm guaranteed cycle-free)
-    in_degree = {e["id"]: 0 for e in events}
-    clean_adj = defaultdict(list)
-    for edge in streamlined_edges:
-        clean_adj[edge["src"]].append(edge["dst"])
-        in_degree[edge["dst"]] += 1
+    id_to_event = {e["id"]: e for e in events}
+    
+    # Assign ranks (fall back to narrative order if missing)
+    for i, e in enumerate(events):
+        info = rank_map.get(e["id"])
+        if info:
+            e["topological_order"] = info["rank"]
+            e["story_time_period"] = info["period"]
+            e["chronological_rationale"] = info["rationale"]
+        else:
+            e["topological_order"] = 1000 + i
 
-    queue = deque([node for node, deg in in_degree.items() if deg == 0])
-    topo_order = []
+    # Sort events strictly by LLM's chronological rank
+    events.sort(key=lambda x: x["topological_order"])
+    topo_order = [e["id"] for e in events]
 
-    while queue:
-        u = queue.popleft()
-        topo_order.append(u)
-        for v in clean_adj[u]:
-            in_degree[v] -= 1
-            if in_degree[v] == 0:
-                queue.append(v)
+    # Construct single sequential forward timeline edges: (Rank 1) -> (Rank 2) -> ... -> (Rank N)
+    edges: list[dict] = []
+    for i in range(len(events) - 1):
+        edges.append({
+            "src": events[i]["id"],
+            "dst": events[i + 1]["id"],
+            "rel": "HAPPENS_BEFORE",
+        })
 
-    # Append any unlinked nodes by page order
-    remaining = [node for node in in_degree if node not in set(topo_order)]
-    remaining.sort(key=lambda nid: (id_map[nid]["page_start"], id_map[nid]["id"]))
-    topo_order.extend(remaining)
-
-    return streamlined_edges, topo_order
+    return edges, topo_order
 
 
 def push_to_neo4j(doc_id: str, events: list[dict], edges: list[dict]) -> None:
@@ -142,12 +142,12 @@ def push_to_neo4j(doc_id: str, events: list[dict], edges: list[dict]) -> None:
                 "doc_id": doc_id,
                 "name": e["event_name"],
                 "summary": e["summary"],
-                "classification": e["classification"],
+                "classification": e.get("classification", "story_progression"),
                 "page_start": e["page_start"],
                 "page_end": e["page_end"],
-                "source_pages": e["page_numbers"],
-                "characters": e["characters"],
-                "temporal_anchor": e["temporal_anchor"],
+                "source_pages": e.get("page_numbers", []),
+                "characters": e.get("characters", []),
+                "temporal_anchor": e.get("temporal_anchor", ""),
                 "topological_order": e.get("topological_order", 0),
             }
             for e in events
@@ -173,7 +173,7 @@ def push_to_neo4j(doc_id: str, events: list[dict], edges: list[dict]) -> None:
             nodes=node_payload,
         )
 
-        # Batch create single directional edges (strictly 1 edge per pair)
+        # Batch create single directional forward edges
         if edges:
             session.run(
                 """

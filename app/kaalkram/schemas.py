@@ -67,6 +67,31 @@ class RollingMemory(BaseModel):
     unresolved_threads: list[str] = []
 
 
+# ============================================================
+# Global LLM Timeline Ordering Models
+# ============================================================
+class OrderedTimelineEventItem(BaseModel):
+    event_id: str = Field(description="The unique ID of the event being placed.")
+    chronological_rank: int = Field(
+        description="Strict sequential integer rank in true story time (1 = earliest in story world / past memories, N = final resolution)."
+    )
+    story_time_period: str = Field(
+        description="Estimated story time period (e.g. 'Youth in Casablanca / Decades Ago', 'Day 1 Morning', 'Day 3 Night')."
+    )
+    chronological_rationale: str = Field(
+        description="Brief 1-sentence reason explaining why this event occurs at this specific point in story chronology."
+    )
+
+
+class GlobalTimelineOrderingResponse(BaseModel):
+    chronological_overview: str = Field(
+        description="High-level breakdown of the story's true chronological progression from past to present."
+    )
+    ordered_events: list[OrderedTimelineEventItem] = Field(
+        description="All events ordered strictly in true story-world chronological sequence."
+    )
+
+
 class TimelineGraphNode(BaseModel):
     id: str
     doc_id: str
