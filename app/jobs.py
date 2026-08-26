@@ -76,6 +76,13 @@ def run_naive(job_id: str, doc_id: str) -> None:
         update(job_id, status="error", error=f"{type(exc).__name__}: {exc}")
 
 
+def _doc_title(doc_id: str) -> str:
+    with pg() as cur:
+        cur.execute("SELECT title FROM documents WHERE id = %s", (doc_id,))
+        row = cur.fetchone()
+    return (row["title"] if row else "") or doc_id
+
+
 def run_kaalkram(job_id: str, doc_id: str) -> None:
     from . import graph, passes
     from .ingest import sliding_windows
@@ -83,24 +90,32 @@ def run_kaalkram(job_id: str, doc_id: str) -> None:
     try:
         pages = doc_pages(doc_id)
         windows = sliding_windows(pages)
+        title = _doc_title(doc_id)
 
-        # ---- Pass 1: 0.00 -> 0.45
+        # ---- Pass 1: 0.00 -> 0.42
         update(job_id, status="running", stage="pass 1: reading windows", progress=0.01)
         obs = passes.run_pass1(
             doc_id, windows,
-            on_progress=lambda p, msg: update(job_id, progress=0.01 + p * 0.44, stage=msg),
+            on_progress=lambda p, msg: update(job_id, progress=0.01 + p * 0.41, stage=msg),
         )
 
-        # ---- Pass 2: 0.45 -> 0.80
-        update(job_id, stage="pass 2: merging duplicates", progress=0.45)
+        # ---- Pass 0: 0.42 -> 0.48 (book-specific taxonomy)
+        update(job_id, stage="pass 0: inventing stage taxonomy", progress=0.42)
+        taxonomy = passes.run_pass0(
+            doc_id, title, obs,
+            on_progress=lambda p, msg: update(job_id, progress=0.42 + p * 0.06, stage=msg),
+        )
+
+        # ---- Pass 2: 0.48 -> 0.80
+        update(job_id, stage="pass 2: merging duplicates", progress=0.48)
         events = passes.run_pass2(
-            doc_id, obs,
-            on_progress=lambda p, msg: update(job_id, progress=0.45 + p * 0.35, stage=msg),
+            doc_id, obs, taxonomy=taxonomy,
+            on_progress=lambda p, msg: update(job_id, progress=0.48 + p * 0.32, stage=msg),
         )
 
         # ---- Pass 3 + persist: 0.80 -> 0.93
         update(job_id, stage="pass 3: ordering the story", progress=0.80)
-        events = passes.run_pass3(events)
+        events = passes.run_pass3(events, taxonomy=taxonomy)
         passes.persist_events(
             doc_id, events,
             on_progress=lambda p, msg: update(job_id, progress=0.82 + p * 0.11, stage=msg),
@@ -119,6 +134,7 @@ def run_kaalkram(job_id: str, doc_id: str) -> None:
             "minor": len(events) - majors,
             "merges": merges,
             "windows": len(windows),
+            "taxonomy": [s["name"] for s in taxonomy],
             **stats,
         })
     except Exception as exc:

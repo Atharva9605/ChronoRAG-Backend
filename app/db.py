@@ -47,6 +47,15 @@ def neo4j():
     return _neo4j
 
 
+def ensure_schema() -> None:
+    """Idempotent migrations for already-provisioned Postgres volumes."""
+    with pg() as cur:
+        cur.execute(
+            """ALTER TABLE documents
+               ADD COLUMN IF NOT EXISTS taxonomy JSONB NOT NULL DEFAULT '[]'::jsonb"""
+        )
+
+
 def init_neo4j() -> None:
     """Apply constraints/indexes. Safe to call on every startup."""
     path = ROOT / "infra" / "neo4j" / "init.cypher"

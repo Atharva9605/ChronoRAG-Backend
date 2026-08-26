@@ -1,5 +1,4 @@
 import json
-import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7,10 +6,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pgvector.psycopg import Vector
 
 from . import llm
-from .config import settings, TAXONOMY, stage_index
+from .config import settings, stage_index, stage_names, DEFAULT_TAXONOMY
 from .db import pg
-from .ingest import parse_pages_from_bullet
-from .schemas import BatchMergeResponse
+from .schemas import BatchMergeResponse, TaxonomyProposal
 
 # ============================================================
 # PASS 1 — parallel skim
@@ -94,22 +92,167 @@ def run_pass1(doc_id: str, windows: list[dict], on_progress=None) -> list[dict]:
 
 
 # ============================================================
+# PASS 0 — invent a book-specific stage taxonomy
+# ============================================================
+PASS0_SYSTEM = """You design a coarse STORY-WORLD timeline taxonomy for ONE narrative book.
+
+Goal: 5 to 7 ordered stages that partition the plot by when events happen in the story world,
+NOT by print/chapter order. Flashbacks, framing prologues, and epilogues must sit at their
+story-time position (often the last stage if they are aftermath/frame).
+
+Rules:
+- Stages must be specific to THIS book (characters, settings, plot beats) — not generic
+  "rising action / climax" labels unless the book truly has no clearer beats.
+- Each stage name: 2–6 words, Title Case, optionally "A / B" form.
+- Descriptions: concrete cues an annotator can match (who/what belongs here).
+- Mark is_framing=true only for stages that collect out-of-order printed framing
+  (epilogue, tourists seeing the aftermath, hospital frame, "years later", etc.).
+- Cover the whole narrative arc; no huge gaps; no overlapping stages.
+- Return stages in story-world chronological order (earliest → latest)."""
+
+
+def _normalize_stages(stages: list) -> list[dict]:
+    out: list[dict] = []
+    for s in stages:
+        if isinstance(s, dict):
+            name = str(s.get("name") or "").strip()
+            if not name:
+                continue
+            out.append({
+                "name": name,
+                "description": str(s.get("description") or "").strip(),
+                "is_framing": bool(s.get("is_framing", False)),
+            })
+        else:
+            name = str(getattr(s, "name", "") or "").strip()
+            if not name:
+                continue
+            out.append({
+                "name": name,
+                "description": str(getattr(s, "description", "") or "").strip(),
+                "is_framing": bool(getattr(s, "is_framing", False)),
+            })
+    # Enforce 5–7 by trimming or padding with defaults (rare).
+    if len(out) > 7:
+        out = out[:7]
+    if len(out) < 5:
+        for name in DEFAULT_TAXONOMY:
+            if len(out) >= 5:
+                break
+            if name not in {s["name"] for s in out}:
+                out.append({"name": name, "description": "", "is_framing": name == DEFAULT_TAXONOMY[-1]})
+    if out and not any(s["is_framing"] for s in out):
+        out[-1]["is_framing"] = True
+    return out
+
+
+def _observation_digest(observations: list[dict], *, max_chars: int = 12000) -> str:
+    """Spread sample across the book so Pass 0 sees beginning, middle, and end."""
+    if not observations:
+        return "(no observations)"
+    n = len(observations)
+    if n <= 8:
+        picks = observations
+    else:
+        idxs = sorted({0, 1, n // 4, n // 2, (3 * n) // 4, n - 2, n - 1})
+        picks = [observations[i] for i in idxs if 0 <= i < n]
+    parts: list[str] = []
+    budget = max_chars
+    for o in picks:
+        block = f"--- pages {o['start']}-{o['end']} ---\n{o['content']}"
+        if len(block) > budget:
+            block = block[: max(0, budget - 20)] + "\n…"
+        parts.append(block)
+        budget -= len(block)
+        if budget <= 200:
+            break
+    return "\n\n".join(parts)
+
+
+def save_taxonomy(doc_id: str, stages: list[dict]) -> None:
+    with pg() as cur:
+        cur.execute(
+            "UPDATE documents SET taxonomy = %s::jsonb WHERE id = %s",
+            (json.dumps(stages), doc_id),
+        )
+
+
+def load_taxonomy(doc_id: str) -> list[dict]:
+    with pg() as cur:
+        cur.execute("SELECT taxonomy FROM documents WHERE id = %s", (doc_id,))
+        row = cur.fetchone()
+    raw = (row or {}).get("taxonomy") if row else None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    if not raw:
+        return [
+            {"name": n, "description": "", "is_framing": i == len(DEFAULT_TAXONOMY) - 1}
+            for i, n in enumerate(DEFAULT_TAXONOMY)
+        ]
+    return _normalize_stages(list(raw))
+
+
+def run_pass0(
+    doc_id: str,
+    title: str,
+    observations: list[dict],
+    on_progress=None,
+) -> list[dict]:
+    """
+    Infer a 5–7 stage taxonomy for this document from Pass-1 observations.
+    Cached and written to documents.taxonomy.
+    """
+    cache = _load_cache(doc_id, "pass0")
+    if cache.get("stages"):
+        stages = _normalize_stages(cache["stages"])
+        save_taxonomy(doc_id, stages)
+        if on_progress:
+            on_progress(1.0, f"pass 0: reused {len(stages)} cached stages")
+        return stages
+
+    if on_progress:
+        on_progress(0.1, "pass 0: inventing story-stage taxonomy")
+
+    digest = _observation_digest(observations)
+    user = (
+        f"BOOK TITLE: {title or doc_id}\n"
+        f"OBSERVATION WINDOWS: {len(observations)}\n\n"
+        f"PASS-1 SKIM NOTES (sampled across the book):\n{digest}\n\n"
+        "Propose the taxonomy for THIS book only."
+    )
+    proposal = llm.chat_structured(PASS0_SYSTEM, user, TaxonomyProposal, max_tokens=2000)
+    stages = _normalize_stages(proposal.stages)
+    _save_cache(doc_id, "pass0", {"stages": stages, "title": title})
+    save_taxonomy(doc_id, stages)
+    if on_progress:
+        on_progress(1.0, f"pass 0: {len(stages)} stages — " + ", ".join(s["name"] for s in stages))
+    return stages
+
+
+# ============================================================
 # PASS 2 — stateful merge and deduplication
 # ============================================================
-PASS2_SYSTEM = f"""You are a structural data engineer managing a narrative timeline database.
+def _pass2_system(taxonomy: list[dict]) -> str:
+    lines = []
+    for i, s in enumerate(taxonomy, start=1):
+        desc = s.get("description") or "events that belong in this story phase"
+        frame = " [FRAMING/OUT-OF-PRINT-ORDER]" if s.get("is_framing") else ""
+        lines.append(f'{i}. "{s["name"]}"{frame} — {desc}')
+    last = taxonomy[-1]["name"] if taxonomy else DEFAULT_TAXONOMY[-1]
+    stage_block = "\n".join(lines)
+    return f"""You are a structural data engineer managing a narrative timeline database.
 You receive (a) a light index of events ALREADY in the database, and (b) a new set of raw
 observations. Produce one instruction per observation describing how to integrate it.
 
 STRICT TIMELINE ANCHOR TAXONOMY - timeline_anchor must be EXACTLY one of:
-1. "{TAXONOMY[0]}"      (84 unlucky days, Manolin forced to leave, coffee, preparations on shore)
-2. "{TAXONOMY[1]}"      (alone at sea, flying fish, bait, the great strike / hooking the marlin)
-3. "{TAXONOMY[2]}"      (multi-day fight with the marlin, hand cuts, endurance, killing the fish)
-4. "{TAXONOMY[3]}"      (lashing the fish alongside, shark attacks stripping the catch, skeleton left)
-5. "{TAXONOMY[4]}"      (return to the village, Manolin weeps, tourists see the skeleton, sleep/lions)
+{stage_block}
 
 Assign the anchor by WHERE THE EVENT SITS IN STORY-WORLD TIME, never by where it is printed.
-A late scene printed anywhere that shows the skeleton on the beach or tourists belongs in "{TAXONOMY[4]}".
-Shark attacks belong in "{TAXONOMY[3]}", which is AFTER the marlin is killed ("{TAXONOMY[2]}").
+Framing or aftermath scenes printed early (or late) still belong in their story-time stage
+(usually "{last}" if marked FRAMING).
 
 CATEGORY:
 - "major": core structural milestones that drive the main plot - inciting incidents, turning
@@ -188,7 +331,12 @@ def _native_merge(events: list[dict], resp: BatchMergeResponse) -> tuple[int, in
     return added, merged
 
 
-def run_pass2(doc_id: str, observations: list[dict], on_progress=None) -> list[dict]:
+def run_pass2(
+    doc_id: str,
+    observations: list[dict],
+    taxonomy: list[dict] | None = None,
+    on_progress=None,
+) -> list[dict]:
     """
     Parallel fetch, sequential commit.
 
@@ -196,6 +344,9 @@ def run_pass2(doc_id: str, observations: list[dict], on_progress=None) -> list[d
     timeline index, but their decisions are applied one at a time. That keeps the
     merge deterministic and free of race conditions.
     """
+    tax = _normalize_stages(taxonomy) if taxonomy else load_taxonomy(doc_id)
+    system = _pass2_system(tax)
+
     bs = settings.pass2_batch_size
     batches = [
         "\n\n".join(
@@ -215,7 +366,7 @@ def run_pass2(doc_id: str, observations: list[dict], on_progress=None) -> list[d
             f"NEW OBSERVATIONS TO RECONCILE:\n{text}"
         )
         try:
-            return idx, llm.chat_structured(PASS2_SYSTEM, user, BatchMergeResponse)
+            return idx, llm.chat_structured(system, user, BatchMergeResponse)
         except Exception:
             return idx, None
 
@@ -245,7 +396,7 @@ def run_pass2(doc_id: str, observations: list[dict], on_progress=None) -> list[d
                             f"pass 2: batch {processed}/{total} "
                             f"({len(events)} events, {stats['merged']} merges)")
 
-        _save_cache(doc_id, "pass2", {"events": events, "stats": stats})
+        _save_cache(doc_id, "pass2", {"events": events, "stats": stats, "taxonomy": tax})
 
     return events
 
@@ -253,24 +404,34 @@ def run_pass2(doc_id: str, observations: list[dict], on_progress=None) -> list[d
 # ============================================================
 # PASS 3 — deterministic chronology
 # ============================================================
-FRAME_HINTS = ("tourist", "tourists", "skeleton", "aftermath", "homecoming",
-               "years later", "epilogue")
+# Book-agnostic cues that an event is framing / out-of-print-order aftermath.
+GENERIC_FRAME_HINTS = (
+    "years later", "epilogue", "prologue frame", "frame narrative",
+    "framing device", "looking back", "afterwards", "aftermath",
+)
 
 
-def run_pass3(events: list[dict]) -> list[dict]:
+def run_pass3(events: list[dict], taxonomy: list[dict] | None = None) -> list[dict]:
     """
     Two deterministic steps, no LLM:
       1. Assign a stage_order from the taxonomy, overriding obvious framing devices.
       2. Sort by (stage_order, first source page).
     """
+    tax = _normalize_stages(taxonomy) if taxonomy else [
+        {"name": n, "description": "", "is_framing": False} for n in DEFAULT_TAXONOMY
+    ]
+    names = stage_names(tax)
+    framing_names = [s["name"] for s in tax if s.get("is_framing")]
+    frame_target = framing_names[-1] if framing_names else names[-1]
+
     for e in events:
         e["source_pages"] = sorted(set(e.get("source_pages") or []))
         e["first_page"] = e["source_pages"][0] if e["source_pages"] else 0
 
         blob = f"{e['event_name']} {e['core_event']}".lower()
-        if any(h in blob for h in FRAME_HINTS):
-            e["timeline_anchor"] = TAXONOMY[-1]      # Future / Epilogue
-        e["stage_order"] = stage_index(e["timeline_anchor"])
+        if any(h in blob for h in GENERIC_FRAME_HINTS):
+            e["timeline_anchor"] = frame_target
+        e["stage_order"] = stage_index(e["timeline_anchor"], tax)
 
     events.sort(key=lambda e: (e["stage_order"], e["first_page"], e["event_name"]))
     return events

@@ -6,16 +6,38 @@ from pydantic import BaseModel, Field
 # ============================================================
 # LLM contracts (Part B) — these become strict JSON schemas
 # ============================================================
+class TaxonomyStage(BaseModel):
+    name: str = Field(
+        description="Short stage label, e.g. 'Shore / Setup' or 'Exam Crisis'. 2-6 words."
+    )
+    description: str = Field(
+        description="What belongs in this stage — concrete plot beats, not vague theme talk."
+    )
+    is_framing: bool = Field(
+        description=(
+            "True if this stage is framing/epilogue/aftermath that may be printed out of "
+            "story-world order (prologue hospital scene, tourists at the end, etc.)."
+        )
+    )
+
+
+class TaxonomyProposal(BaseModel):
+    stages: list[TaxonomyStage] = Field(
+        description="5 to 7 stages ordered by story-world time from earliest to latest"
+    )
+
+
 class TimelineEvent(BaseModel):
     event_name: str = Field(description="Short descriptive name of the event")
     timeline_anchor: str = Field(
         description=(
-            "Exactly one of: 'Shore / Setup', 'Out to Sea / The Hunt', "
-            "'Struggle with the Marlin', 'Return / The Sharks', "
-            "'Homecoming / Aftermath'"
+            "Exactly one stage name from the STRICT TIMELINE ANCHOR TAXONOMY "
+            "listed in the system prompt (copy the stage name verbatim)"
         )
     )
-    location: str = Field(description="Setting, formatted specific-to-general e.g. 'Kumaon Hostel, IIT Delhi'")
+    location: str = Field(
+        description="Setting, formatted specific-to-general e.g. 'skiff, Gulf Stream off Cuba'"
+    )
     characters_present: list[str] = Field(description="Names of characters involved")
     core_event: str = Field(description="One or two sentence summary of what happens")
     antecedent_cause: str = Field(description="What triggered this event")
@@ -47,6 +69,12 @@ class GraphAnswer(BaseModel):
 # ============================================================
 # API models
 # ============================================================
+class TaxonomyStageOut(BaseModel):
+    name: str
+    description: str = ""
+    is_framing: bool = False
+
+
 class DocumentOut(BaseModel):
     id: str
     title: str
@@ -55,6 +83,7 @@ class DocumentOut(BaseModel):
     naive_ready: bool = False
     kaalkram_ready: bool = False
     event_count: int = 0
+    taxonomy: list[TaxonomyStageOut] = []
 
 
 class JobOut(BaseModel):

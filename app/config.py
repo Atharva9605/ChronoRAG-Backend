@@ -51,33 +51,56 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Canonical story-stage taxonomy. stage_order drives chronological sorting.
-# Tuned for Hemingway's The Old Man and the Sea (swap for another book).
-TAXONOMY: list[str] = [
-    "Shore / Setup",
-    "Out to Sea / The Hunt",
-    "Struggle with the Marlin",
-    "Return / The Sharks",
-    "Homecoming / Aftermath",
+# Fallback only — used if Pass 0 has not produced a per-document taxonomy yet.
+# Prefer document.taxonomy from the DB for any real build.
+DEFAULT_TAXONOMY: list[str] = [
+    "Beginning / Setup",
+    "Rising Action",
+    "Midpoint / Complication",
+    "Climax",
+    "Resolution / Aftermath",
 ]
-STAGE_ORDER = {name: i for i, name in enumerate(TAXONOMY)}
+
+# Back-compat alias for older imports / health endpoints.
+TAXONOMY = DEFAULT_TAXONOMY
 
 
-def stage_index(anchor: str) -> int:
-    """Map a free-text anchor onto the taxonomy, tolerating minor LLM drift."""
-    if anchor in STAGE_ORDER:
-        return STAGE_ORDER[anchor]
-    low = anchor.lower()
-    for name, idx in STAGE_ORDER.items():
-        if name.lower() in low or low in name.lower():
+def stage_names(taxonomy: list) -> list[str]:
+    """Normalize taxonomy records (strings or {name,...} dicts) to stage names."""
+    names: list[str] = []
+    for item in taxonomy or []:
+        if isinstance(item, str):
+            name = item.strip()
+        elif isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        else:
+            name = str(getattr(item, "name", "") or "").strip()
+        if name:
+            names.append(name)
+    return names or list(DEFAULT_TAXONOMY)
+
+
+def stage_index(anchor: str, taxonomy: list | None = None) -> int:
+    """Map a free-text anchor onto the given taxonomy, tolerating minor LLM drift."""
+    names = stage_names(taxonomy if taxonomy is not None else DEFAULT_TAXONOMY)
+    order = {name: i for i, name in enumerate(names)}
+    if anchor in order:
+        return order[anchor]
+    low = (anchor or "").lower().strip()
+    if not low:
+        return min(1, len(names) - 1)
+    for name, idx in order.items():
+        nl = name.lower()
+        if nl in low or low in nl:
             return idx
-    for key, idx in (
-        ("shore", 0), ("setup", 0), ("skiff", 0), ("manolin", 0), ("boy", 0),
-        ("hunt", 1), ("out to sea", 1), ("bait", 1), ("hook", 1),
-        ("marlin", 2), ("struggle", 2), ("fight", 2), ("line", 2),
-        ("shark", 3), ("return", 3), ("skeleton", 3), ("carcass", 3),
-        ("home", 4), ("aftermath", 4), ("tourist", 4), ("sleep", 4), ("dream", 4),
-    ):
-        if key in low:
-            return idx
-    return 1  # safe default: main story body
+    # Token overlap fallback (no book-specific keyword table).
+    tokens = {t for t in low.replace("/", " ").replace("-", " ").split() if len(t) > 2}
+    best_idx, best_score = 0, 0
+    for name, idx in order.items():
+        ntokens = {t for t in name.lower().replace("/", " ").replace("-", " ").split() if len(t) > 2}
+        score = len(tokens & ntokens)
+        if score > best_score:
+            best_idx, best_score = idx, score
+    if best_score > 0:
+        return best_idx
+    return min(1, len(names) - 1)

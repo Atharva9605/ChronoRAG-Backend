@@ -8,6 +8,9 @@ CREATE TABLE IF NOT EXISTS documents (
     title         TEXT NOT NULL,
     filename      TEXT NOT NULL,
     page_count    INT  NOT NULL,
+    -- Per-document story-stage taxonomy (Pass 0). JSON array of
+    -- {name, description, is_framing} ordered by story-world time.
+    taxonomy      JSONB NOT NULL DEFAULT '[]'::jsonb,
     uploaded_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

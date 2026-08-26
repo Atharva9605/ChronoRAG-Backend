@@ -1,3 +1,4 @@
+import json
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -7,14 +8,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import db, evaluation, graph, jobs, llm, naive_rag, passes, query_engine
-from .config import settings, TAXONOMY
+from .config import settings, DEFAULT_TAXONOMY
 from .ingest import doc_id_for, extract_pages
-from .schemas import CompareResponse, DocumentOut, EventOut, JobOut
+from .schemas import CompareResponse, DocumentOut, EventOut, JobOut, TaxonomyStageOut
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.pool()
+    db.ensure_schema()
     db.init_neo4j()
     yield
     db.close()
@@ -29,6 +31,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _taxonomy_out(raw) -> list[TaxonomyStageOut]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    out: list[TaxonomyStageOut] = []
+    for item in raw or []:
+        if isinstance(item, str):
+            out.append(TaxonomyStageOut(name=item))
+        elif isinstance(item, dict) and item.get("name"):
+            out.append(TaxonomyStageOut(
+                name=item["name"],
+                description=item.get("description") or "",
+                is_framing=bool(item.get("is_framing", False)),
+            ))
+    return out
 
 
 # ------------------------------------------------------------
@@ -82,7 +103,7 @@ async def upload(file: UploadFile = File(...)):
 async def list_documents():
     with db.pg() as cur:
         cur.execute(
-            """SELECT d.id, d.title, d.filename, d.page_count,
+            """SELECT d.id, d.title, d.filename, d.page_count, d.taxonomy,
                       (SELECT count(*) FROM naive_chunks n WHERE n.doc_id = d.id) AS chunks,
                       (SELECT count(*) FROM events e WHERE e.doc_id = d.id) AS events
                FROM documents d ORDER BY d.uploaded_at DESC"""
@@ -95,6 +116,7 @@ async def list_documents():
             naive_ready=r["chunks"] > 0,
             kaalkram_ready=r["events"] > 0,
             event_count=r["events"],
+            taxonomy=_taxonomy_out(r["taxonomy"]),
         )
         for r in rows
     ]
@@ -218,9 +240,20 @@ async def metrics(doc_id: str):
     return evaluation.summarise(doc_id)
 
 
+@app.get("/api/documents/{doc_id}/taxonomy")
+async def document_taxonomy(doc_id: str):
+    doc_pages(doc_id)  # 404 if missing
+    stages = passes.load_taxonomy(doc_id)
+    return {"doc_id": doc_id, "stages": _taxonomy_out(stages)}
+
+
 @app.get("/api/taxonomy")
 async def taxonomy():
-    return {"stages": TAXONOMY}
+    """Fallback default stages (not book-specific). Prefer /api/documents/{id}/taxonomy."""
+    return {
+        "stages": DEFAULT_TAXONOMY,
+        "note": "global fallback only; use GET /api/documents/{doc_id}/taxonomy after Build Kaalkram",
+    }
 
 
 @app.get("/api/health")
