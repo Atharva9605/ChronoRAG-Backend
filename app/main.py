@@ -1,4 +1,5 @@
 import shutil
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -51,11 +52,12 @@ async def upload(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "only .pdf is supported")
 
-    dest = settings.upload_path / file.filename
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    saved_filename = f"{doc_id}_{file.filename}"
+    dest = settings.upload_path / saved_filename
     with dest.open("wb") as fh:
         shutil.copyfileobj(file.file, fh)
 
-    doc_id = doc_id_for(dest)
     pages = extract_pages(dest)
     if not any(p.strip() for p in pages):
         raise HTTPException(400, "no extractable text — this looks like a scanned PDF")
@@ -64,11 +66,9 @@ async def upload(file: UploadFile = File(...)):
     with db.pg() as cur:
         cur.execute(
             """INSERT INTO documents (id, title, filename, page_count)
-               VALUES (%s,%s,%s,%s)
-               ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title""",
+               VALUES (%s,%s,%s,%s)""",
             (doc_id, title, file.filename, len(pages)),
         )
-        cur.execute("DELETE FROM pages WHERE doc_id = %s", (doc_id,))
         cur.executemany(
             "INSERT INTO pages (doc_id, page_no, content) VALUES (%s,%s,%s)",
             [(doc_id, i, txt) for i, txt in enumerate(pages, start=1)],
