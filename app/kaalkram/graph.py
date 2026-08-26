@@ -7,71 +7,86 @@ logger = logging.getLogger(__name__)
 
 def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
     """
-    Constructs directional edges based on sequential flow, preceding event references,
-    and flashback logic. Computes topological ordering using Kahn's algorithm.
+    Constructs a clean, strictly acyclic Directed Acyclic Graph (DAG) for the story timeline.
+    Guarantees no circular dependencies (A happens before B AND B happens before A).
     """
-    edges: list[dict] = []
-    id_map = {e["id"]: e for e in events}
-    name_map = {e["event_name"].lower().strip(): e["id"] for e in events}
-    
-    # 1. Connect sequential story_progression events
-    story_events = [e for e in events if e["classification"] == "story_progression"]
-    for i in range(len(story_events) - 1):
-        edges.append({
-            "src": story_events[i]["id"],
-            "dst": story_events[i + 1]["id"],
-            "rel": "HAPPENS_BEFORE",
-        })
+    if not events:
+        return [], []
 
-    # 2. Connect explicit preceding references (strict word matching)
+    # Map events by id and chronological/narrative sequence index
+    id_map = {e["id"]: e for e in events}
+    event_index_map = {e["id"]: i for i, e in enumerate(events)}
+    name_map = {e["event_name"].lower().strip(): e["id"] for e in events}
+
+    adj_graph = defaultdict(set)
+    edges: list[dict] = []
+
+    def can_add_edge(u: str, v: str) -> bool:
+        """Checks if adding edge u -> v would create a cycle or self-loop."""
+        if u == v:
+            return False
+        # If v can reach u, then adding u -> v creates a cycle
+        queue = deque([v])
+        visited = {v}
+        while queue:
+            curr = queue.popleft()
+            if curr == u:
+                return False
+            for nxt in adj_graph[curr]:
+                if nxt not in visited:
+                    visited.add(nxt)
+                    queue.append(nxt)
+        return True
+
+    def add_edge(src: str, dst: str, rel: str = "HAPPENS_BEFORE") -> bool:
+        if can_add_edge(src, dst) and dst not in adj_graph[src]:
+            adj_graph[src].add(dst)
+            edges.append({"src": src, "dst": dst, "rel": rel})
+            return True
+        return False
+
+    # 1. Forward linear narrative chain for sequential story progression
+    story_events = [e for e in events if e.get("classification") == "story_progression"]
+    for i in range(len(story_events) - 1):
+        add_edge(story_events[i]["id"], story_events[i + 1]["id"], "HAPPENS_BEFORE")
+
+    # 2. Causal references (connect if strictly valid in forward direction)
     for e in events:
         ref = (e.get("preceding_event_reference") or "").lower().strip()
-        if ref and ref not in ("none", "n/a", "null") and len(ref) > 8:
+        if ref and ref not in ("none", "n/a", "null") and len(ref) > 6:
+            ref_words = set(ref.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
             best_match_id = None
             best_overlap = 0
-            ref_words = set(ref.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
-            
+
             for name, prior_id in name_map.items():
                 if prior_id == e["id"]:
                     continue
-                name_words = set(name.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
-                overlap = len(ref_words & name_words)
-                if overlap >= 2 and overlap > best_overlap:
-                    best_overlap = overlap
-                    best_match_id = prior_id
-            
+                # Only link to events that occurred prior in narrative
+                if event_index_map[prior_id] < event_index_map[e["id"]]:
+                    name_words = set(name.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
+                    overlap = len(ref_words & name_words)
+                    if overlap >= 2 and overlap > best_overlap:
+                        best_overlap = overlap
+                        best_match_id = prior_id
+
             if best_match_id:
-                edges.append({
-                    "src": best_match_id,
-                    "dst": e["id"],
-                    "rel": "CAUSES",
-                })
+                add_edge(best_match_id, e["id"], "CAUSES")
 
-    # 3. Handle Flashbacks: Flashbacks occurred chronologically BEFORE forward narrative
-    flashbacks = [e for e in events if e["classification"] in ("flashback", "backstory")]
-    if story_events and flashbacks:
-        first_story_event = story_events[0]
-        for fb in flashbacks:
-            edges.append({
-                "src": fb["id"],
-                "dst": first_story_event["id"],
-                "rel": "HAPPENS_BEFORE",
-            })
+    # 3. Handle Flashbacks & Backstory:
+    # If an event is a flashback within a window, it happened before the forward event that follows it
+    for i, e in enumerate(events):
+        if e.get("classification") in ("flashback", "backstory"):
+            # Find the next immediate forward story event
+            next_story = next((s for s in events[i + 1:] if s.get("classification") == "story_progression"), None)
+            if next_story:
+                add_edge(e["id"], next_story["id"], "HAPPENS_BEFORE")
+            elif story_events:
+                # If flashback is at the end, attach from previous story event
+                prev_story = next((s for s in reversed(events[:i]) if s.get("classification") == "story_progression"), None)
+                if prev_story:
+                    add_edge(prev_story["id"], e["id"], "HAPPENS_BEFORE")
 
-    # Deduplicate edges
-    seen_edges = set()
-    raw_edges = []
-    for edge in edges:
-        key = (edge["src"], edge["dst"])
-        if key not in seen_edges and edge["src"] != edge["dst"]:
-            seen_edges.add(key)
-            raw_edges.append(edge)
-
-    # Transitive Reduction: Remove direct edge (u -> v) if there is an alternate path from u to v
-    adj_graph = defaultdict(set)
-    for edge in raw_edges:
-        adj_graph[edge["src"]].add(edge["dst"])
-
+    # 4. Transitive Reduction: Remove direct edge (u -> v) if there is an alternate path
     def has_alternate_path(start: str, target: str) -> bool:
         queue = deque([nbr for nbr in adj_graph[start] if nbr != target])
         visited = set(queue)
@@ -85,21 +100,18 @@ def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
                     queue.append(nxt)
         return False
 
-    unique_edges = []
-    for edge in raw_edges:
+    streamlined_edges = []
+    for edge in edges:
         src, dst = edge["src"], edge["dst"]
         if not has_alternate_path(src, dst):
-            unique_edges.append(edge)
+            streamlined_edges.append(edge)
 
-    # 4. Topological Sort (Kahn's Algorithm with cycle resolution)
-    adj = defaultdict(list)
+    # 5. Topological Sort (Kahn's Algorithm guaranteed cycle-free)
     in_degree = {e["id"]: 0 for e in events}
-    
-    for edge in unique_edges:
-        src, dst = edge["src"], edge["dst"]
-        if src in in_degree and dst in in_degree:
-            adj[src].append(dst)
-            in_degree[dst] += 1
+    clean_adj = defaultdict(list)
+    for edge in streamlined_edges:
+        clean_adj[edge["src"]].append(edge["dst"])
+        in_degree[edge["dst"]] += 1
 
     queue = deque([node for node, deg in in_degree.items() if deg == 0])
     topo_order = []
@@ -107,17 +119,17 @@ def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
     while queue:
         u = queue.popleft()
         topo_order.append(u)
-        for v in adj[u]:
+        for v in clean_adj[u]:
             in_degree[v] -= 1
             if in_degree[v] == 0:
                 queue.append(v)
 
-    # Handle remaining nodes in case of circular dependencies
+    # Append any unlinked nodes by page order
     remaining = [node for node in in_degree if node not in set(topo_order)]
     remaining.sort(key=lambda nid: (id_map[nid]["page_start"], id_map[nid]["id"]))
     topo_order.extend(remaining)
 
-    return unique_edges, topo_order
+    return streamlined_edges, topo_order
 
 
 def push_to_neo4j(doc_id: str, events: list[dict], edges: list[dict]) -> None:
@@ -164,13 +176,14 @@ def push_to_neo4j(doc_id: str, events: list[dict], edges: list[dict]) -> None:
             nodes=node_payload,
         )
 
-        # Batch create directional edges
+        # Batch create single directional edges (strictly 1 edge per pair)
         if edges:
             session.run(
                 """
                 UNWIND $edges AS r
                 MATCH (a:Event {id: r.src}), (b:Event {id: r.dst})
-                MERGE (a)-[rel:HAPPENS_BEFORE {relation_type: r.rel}]->(b)
+                MERGE (a)-[rel:HAPPENS_BEFORE]->(b)
+                SET rel.relation_type = r.rel
                 """,
                 edges=edges,
             )
@@ -182,7 +195,7 @@ def fetch_graph(doc_id: str) -> dict:
         result = session.run(
             """
             MATCH (e:Event {doc_id: $d})
-            OPTIONAL MATCH (e)-[r]->(target:Event {doc_id: $d})
+            OPTIONAL MATCH (e)-[r:HAPPENS_BEFORE]->(target:Event {doc_id: $d})
             RETURN e, r, target
             ORDER BY e.topological_order, e.page_start
             """,
