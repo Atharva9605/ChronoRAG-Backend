@@ -14,27 +14,46 @@ CONF_SEQUENTIAL = 0.3
 CONF_CAUSAL = 0.9
 
 def _causal_pairs(events: list[dict]) -> list[tuple[str, str, float]]:
-    """Use vector similarity + LLM to infer causal links."""
+    """Use vector similarity + concurrent LLM to infer causal links."""
     from . import llm
     import numpy as np
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
     def cosine_sim(a, b):
         return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
     
-    pairs = []
+    candidates = []
     for a in events:
         for b in events:
             if a["id"] == b["id"]:
                 continue
             
             sim = cosine_sim(a["embedding"], b["embedding"])
-            if sim > 0.65:
-                prompt = f"""Does Event A directly cause Event B?
+            if sim > 0.78:  # Higher threshold to prevent 900+ calls
+                candidates.append((a, b))
+
+    pairs = []
+    
+    def check_causal(a, b):
+        prompt = f"""Does Event A directly cause Event B?
 Event A: {a['event_name']} - {a['core_event']}
 Event B: {b['event_name']} - {b['core_event']}
 Output only YES or NO."""
-                resp = llm.chat("You are a causal reasoning engine.", prompt, max_tokens=10).strip().upper()
-                if "YES" in resp:
-                    pairs.append((a["id"], b["id"], CONF_CAUSAL))
+        try:
+            resp = llm.chat("You are a causal reasoning engine.", prompt, max_tokens=10).strip().upper()
+            if "YES" in resp:
+                return (a["id"], b["id"], CONF_CAUSAL)
+        except Exception:
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futs = [pool.submit(check_causal, a, b) for a, b in candidates]
+        for fut in as_completed(futs):
+            res = fut.result()
+            if res:
+                pairs.append(res)
+                
     return pairs
 
 def build_edges(events: list[dict]) -> tuple[list[dict], dict, list[str]]:
@@ -77,7 +96,7 @@ def build_edges(events: list[dict]) -> tuple[list[dict], dict, list[str]]:
     topo_order = list(nx.topological_sort(g))
 
     edges = [
-        {"source": u, "target": v, "confidence": d["confidence"], "kind": d["kind"]}
+        {"src": u, "dst": v, "confidence": d["confidence"], "kind": d["kind"]}
         for u, v, d in g.edges(data=True)
     ]
     return edges, {"cycles_repaired": dropped}, topo_order
@@ -94,7 +113,7 @@ def push(doc_id: str, events: list[dict], edges: list[dict]) -> None:
             """UNWIND $rows AS r
                CREATE (e:Event {
                  id: r.id, doc_id: $doc, name: r.event_name, category: r.category,
-                 anchor: r.timeline_anchor, stage_order: r.stage_order,
+                 anchor: r.chronological_clue, stage_order: r.topological_order,
                  location: r.location, core: r.core_event,
                  cause: r.antecedent_cause, effect: r.consequent_effect,
                  pages: r.source_pages, first_page: r.first_page
