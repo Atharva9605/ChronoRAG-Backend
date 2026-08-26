@@ -301,16 +301,49 @@ def push_to_neo4j(doc_id: str, events: list[dict], edges: list[dict]) -> None:
             nodes=node_payload,
         )
 
-        # Batch create single directional forward edges
+        # Batch create single directional forward timeline edges
         if edges:
             session.run(
                 """
                 UNWIND $edges AS r
-                MATCH (a:Event {id: r.src}), (b:Event {id: r.dst})
+                MATCH (a:Event {id: r.src, doc_id: $d}), (b:Event {id: r.dst, doc_id: $d})
                 MERGE (a)-[rel:HAPPENS_BEFORE]->(b)
                 SET rel.relation_type = r.rel
                 """,
                 edges=edges,
+                d=doc_id,
+            )
+
+        # Collect distinct characters and appearance links
+        char_nodes = set()
+        char_edges = []
+        for e in events:
+            for c in e.get("characters") or []:
+                c_clean = c.strip()
+                if c_clean and len(c_clean) > 1:
+                    char_nodes.add(c_clean)
+                    char_edges.append({"character": c_clean, "event_id": e["id"]})
+
+        # Batch create Character nodes and APPEARS_IN relationships
+        if char_nodes:
+            session.run(
+                """
+                UNWIND $characters AS c
+                MERGE (ch:Character {name: c, doc_id: $d})
+                """,
+                characters=list(char_nodes),
+                d=doc_id,
+            )
+
+            session.run(
+                """
+                UNWIND $char_edges AS r
+                MATCH (ch:Character {name: r.character, doc_id: $d})
+                MATCH (ev:Event {id: r.event_id, doc_id: $d})
+                MERGE (ch)-[:APPEARS_IN]->(ev)
+                """,
+                char_edges=char_edges,
+                d=doc_id,
             )
 
 
