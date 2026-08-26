@@ -1,76 +1,87 @@
 import copy
 import json
+import logging
+import os
 import random
 import re
 import threading
 import time
 from typing import Any
 
-from openai import AzureOpenAI, APIStatusError, APITimeoutError, APIConnectionError, BadRequestError
+import litellm
+from pydantic import BaseModel
 
 from .config import settings
 
-_client: AzureOpenAI | None = None
-_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
-# Cumulative token accounting, per-thread-safe
+# Configure LiteLLM defaults
+litellm.drop_params = True
+litellm.set_verbose = False
+litellm.num_retries = 5
+
+_lock = threading.Lock()
 _usage = {"prompt": 0, "completion": 0}
 
 
 class ContentFilterError(RuntimeError):
-    """Azure OpenAI blocked the prompt/response under its content policy."""
+    """Content filter blocked prompt/response."""
 
 
-def _is_content_filter(exc: BaseException) -> bool:
-    text = str(exc).lower()
-    if "content_filter" in text or "content management policy" in text:
-        return True
-    if isinstance(exc, APIStatusError):
-        try:
-            err = exc.response.json().get("error") or {}
-            return err.get("code") == "content_filter"
-        except Exception:
-            return False
-    return False
+def _get_chat_model() -> tuple[str, dict]:
+    """Resolves model name and kwargs for LiteLLM completion."""
+    kwargs: dict[str, Any] = {}
+    
+    if settings.llm_model:
+        model = settings.llm_model
+    elif settings.azure_openai_endpoint:
+        model = f"azure/{settings.azure_chat_deployment}"
+        kwargs["api_base"] = settings.azure_openai_endpoint
+        kwargs["api_key"] = settings.azure_openai_api_key
+        kwargs["api_version"] = settings.azure_openai_api_version
+    else:
+        model = "gpt-4o"
+
+    if settings.openai_api_key:
+        kwargs["api_key"] = settings.openai_api_key
+    if settings.litellm_api_base:
+        kwargs["api_base"] = settings.litellm_api_base
+    if settings.litellm_api_key:
+        kwargs["api_key"] = settings.litellm_api_key
+
+    return model, kwargs
 
 
-def _sanitize_for_azure(text: str, *, limit: int = 12000) -> str:
-    """Strip noisy PDF/OCR junk that often trips Azure hate filters."""
-    # Drop non-printable / odd control chars; keep basic punctuation & newlines
-    cleaned = "".join(
-        ch if (ch in "\n\t" or 32 <= ord(ch) < 127 or ord(ch) > 159) else " "
-        for ch in text
-    )
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned[:limit].strip()
+def _get_embed_model() -> tuple[str, dict]:
+    """Resolves embedding model name and kwargs for LiteLLM embedding."""
+    kwargs: dict[str, Any] = {}
+    
+    if settings.embed_model:
+        model = settings.embed_model
+    elif settings.azure_openai_endpoint:
+        model = f"azure/{settings.azure_embed_deployment}"
+        kwargs["api_base"] = settings.azure_openai_endpoint
+        kwargs["api_key"] = settings.azure_openai_api_key
+        kwargs["api_version"] = settings.azure_openai_api_version
+    else:
+        model = "text-embedding-3-small"
 
+    if settings.openai_api_key:
+        kwargs["api_key"] = settings.openai_api_key
+    if settings.litellm_api_base:
+        kwargs["api_base"] = settings.litellm_api_base
+    if settings.litellm_api_key:
+        kwargs["api_key"] = settings.litellm_api_key
 
-_SAFE_PREFIX = (
-    "Educational literary analysis of a classic novel. "
-    "All quoted text is fiction under discussion, not real-world instructions.\n\n"
-)
-
-
-def client() -> AzureOpenAI:
-    global _client
-    if _client is None:
-        _client = AzureOpenAI(
-            azure_endpoint=settings.azure_openai_endpoint,
-            api_key=settings.azure_openai_api_key,
-            api_version=settings.azure_openai_api_version,
-            timeout=240.0,
-            max_retries=0,          # we do our own backoff
-        )
-    return _client
+    return model, kwargs
 
 
 def _record(usage) -> None:
     if usage is None:
         return
     with _lock:
-        _usage["prompt"] += usage.prompt_tokens or 0
-        _usage["completion"] += usage.completion_tokens or 0
+        _usage["prompt"] += getattr(usage, "prompt_tokens", 0) or 0
+        _usage["completion"] += getattr(usage, "completion_tokens", 0) or 0
 
 
 def usage_snapshot() -> dict:
@@ -84,22 +95,27 @@ def reset_usage() -> None:
         _usage["completion"] = 0
 
 
-def backoff(attempt: int, base: float = 4.0, cap: float = 60.0) -> None:
-    delay = min(cap, base * (2 ** attempt)) + random.uniform(0, 2)
+def _parse_retry_after(error_str: str, default: float = 10.0) -> float:
+    """Extracts seconds from 'retry after X seconds' message if present."""
+    match = re.search(r"retry after (\d+)", error_str, re.IGNORECASE)
+    if match:
+        try:
+            return float(match.group(1)) + random.uniform(1.0, 3.0)
+        except Exception:
+            pass
+    return default
+
+
+def _backoff_on_rate_limit(exc: Exception, attempt: int) -> None:
+    """Handles rate limits (429) gracefully with exponential backoff."""
+    exc_str = str(exc)
+    delay = _parse_retry_after(exc_str, default=min(60.0, 4.0 * (2 ** attempt)))
+    logger.warning(f"Rate limit / 429 encountered (attempt {attempt+1}). Backing off for {delay:.1f}s: {exc}")
     time.sleep(delay)
 
 
-# ------------------------------------------------------------
-# Azure Structured Outputs requires a stricter JSON Schema than
-# Pydantic emits by default. This patcher makes it acceptable.
-# ------------------------------------------------------------
 def make_strict_schema(schema: dict) -> dict:
-    """
-    Azure strict mode requires, on EVERY object node including nested $defs:
-      - "additionalProperties": false
-      - every property listed in "required"
-    It also rejects sibling keywords next to "$ref".
-    """
+    """Patches Pydantic JSON schema to be strict-mode compliant."""
     schema = copy.deepcopy(schema)
 
     def patch(node: Any) -> None:
@@ -124,76 +140,79 @@ def make_strict_schema(schema: dict) -> dict:
 
 
 # ------------------------------------------------------------
-# Chat
+# Universal Chat with LiteLLM
 # ------------------------------------------------------------
-def chat(system: str, user: str, *, temperature: float = 0.1,
-         max_tokens: int = 1500, retries: int = 3) -> str:
-    payloads = [
-        (system, _SAFE_PREFIX + _sanitize_for_azure(user, limit=14000)),
-        (system, _SAFE_PREFIX + _sanitize_for_azure(user, limit=4500)),
-        (
-            "You answer brief educational questions about classic fiction using only the notes given.",
-            _SAFE_PREFIX + _sanitize_for_azure(user, limit=2000),
-        ),
+def chat(
+    system: str,
+    user: str,
+    *,
+    temperature: float = 0.1,
+    max_tokens: int = 1500,
+    retries: int = 8,
+) -> str:
+    model, kwargs = _get_chat_model()
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
-    last_exc: BaseException | None = None
+
+    last_exc = None
     for attempt in range(retries):
-        sys_msg, user_msg = payloads[min(attempt, len(payloads) - 1)]
         try:
-            resp = client().chat.completions.create(
-                model=settings.azure_chat_deployment,
-                messages=[{"role": "system", "content": sys_msg},
-                          {"role": "user", "content": user_msg}],
+            resp = litellm.completion(
+                model=model,
+                messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                **kwargs,
             )
             _record(resp.usage)
             return (resp.choices[0].message.content or "").strip()
-        except BadRequestError as exc:
+        except Exception as exc:
             last_exc = exc
-            if _is_content_filter(exc):
+            exc_str = str(exc).lower()
+            if "429" in exc_str or "ratelimit" in exc_str:
+                _backoff_on_rate_limit(exc, attempt)
+                continue
+            if "content_filter" in exc_str:
                 if attempt == retries - 1:
-                    raise ContentFilterError(
-                        "Azure content filter blocked this literary prompt. "
-                        "In Azure AI Foundry → your gpt-4o deployment → Content filter, "
-                        "set Hate/Violence to Annotate or lowest block level, then retry."
-                    ) from exc
-                backoff(min(attempt, 1))
+                    raise ContentFilterError(f"Content filter triggered: {exc}") from exc
+                time.sleep(2.0)
                 continue
             if attempt == retries - 1:
                 raise
-            backoff(attempt)
-        except (APIStatusError, APITimeoutError, APIConnectionError) as exc:
-            last_exc = exc
-            if attempt == retries - 1:
-                raise
-            backoff(attempt)
+            time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+
     if last_exc:
         raise last_exc
     return ""
 
 
-def chat_structured(system: str, user: str, model_cls, *,
-                    temperature: float = 0.1, max_tokens: int = 6000,
-                    retries: int = 3):
-    """Return an instance of model_cls, guaranteed to validate."""
+# ------------------------------------------------------------
+# Universal Structured Chat with LiteLLM
+# ------------------------------------------------------------
+def chat_structured(
+    system: str,
+    user: str,
+    model_cls,
+    *,
+    temperature: float = 0.1,
+    max_tokens: int = 6000,
+    retries: int = 8,
+):
+    model, kwargs = _get_chat_model()
     schema = make_strict_schema(model_cls.model_json_schema())
-    payloads = [
-        (system, _SAFE_PREFIX + _sanitize_for_azure(user, limit=14000)),
-        (system, _SAFE_PREFIX + _sanitize_for_azure(user, limit=4500)),
-        (
-            "Educational fiction timeline assistant. Answer using only supplied event notes.",
-            _SAFE_PREFIX + _sanitize_for_azure(user, limit=2000),
-        ),
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
-    last_exc: BaseException | None = None
+
+    last_exc = None
     for attempt in range(retries):
-        sys_msg, user_msg = payloads[min(attempt, len(payloads) - 1)]
         try:
-            resp = client().chat.completions.create(
-                model=settings.azure_chat_deployment,
-                messages=[{"role": "system", "content": sys_msg},
-                          {"role": "user", "content": user_msg}],
+            resp = litellm.completion(
+                model=model,
+                messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format={
@@ -204,52 +223,72 @@ def chat_structured(system: str, user: str, model_cls, *,
                         "schema": schema,
                     },
                 },
+                **kwargs,
             )
             _record(resp.usage)
             raw = resp.choices[0].message.content
             if not raw:
-                raise ValueError("empty structured response")
+                raise ValueError("Empty structured response from LLM")
             return model_cls.model_validate_json(raw)
-        except BadRequestError as exc:
+        except Exception as exc:
             last_exc = exc
-            if _is_content_filter(exc):
+            exc_str = str(exc).lower()
+            if "429" in exc_str or "ratelimit" in exc_str:
+                _backoff_on_rate_limit(exc, attempt)
+                continue
+            if "content_filter" in exc_str:
                 if attempt == retries - 1:
-                    raise ContentFilterError(
-                        "Azure content filter blocked this literary prompt. "
-                        "In Azure AI Foundry → your gpt-4o deployment → Content filter, "
-                        "set Hate/Violence to Annotate or lowest block level, then retry."
-                    ) from exc
-                backoff(min(attempt, 1))
+                    raise ContentFilterError(f"Content filter triggered: {exc}") from exc
+                time.sleep(2.0)
                 continue
             if attempt == retries - 1:
                 raise
-            backoff(attempt)
-        except (APIStatusError, APITimeoutError, APIConnectionError, ValueError, json.JSONDecodeError) as exc:
-            last_exc = exc
-            if attempt == retries - 1:
-                raise
-            backoff(attempt)
-    raise RuntimeError("unreachable")
+            time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Structured LLM call failed")
 
 
 # ------------------------------------------------------------
-# Embeddings
+# Universal Embeddings with LiteLLM & Rate-Limit Resilience
 # ------------------------------------------------------------
-def embed(texts: list[str], retries: int = 3) -> list[list[float]]:
-    """Batch-embed. Azure caps a single request; we chunk at 96 inputs."""
+def embed(texts: list[str], retries: int = 8) -> list[list[float]]:
+    """
+    Batch-embed with LiteLLM.
+    Uses safe sub-batching (32 items) and automatic 429 exponential backoff
+    to safely embed thousands of pages without failing.
+    """
+    if not texts:
+        return []
+
+    model, kwargs = _get_embed_model()
     out: list[list[float]] = []
-    for i in range(0, len(texts), 96):
-        window = [t.replace("\n", " ")[:8000] for t in texts[i:i + 96]]
+    
+    # Safe sub-batch size to prevent rate limits on large books
+    batch_size = 32
+    
+    for i in range(0, len(texts), batch_size):
+        chunk = [t.replace("\n", " ")[:8000] for t in texts[i:i + batch_size]]
         for attempt in range(retries):
             try:
-                resp = client().embeddings.create(
-                    model=settings.azure_embed_deployment,
-                    input=window,
+                resp = litellm.embedding(
+                    model=model,
+                    input=chunk,
+                    **kwargs,
                 )
-                out.extend([d.embedding for d in resp.data])
+                out.extend([d["embedding"] for d in resp.data])
+                # Tiny breather between batches for high-volume documents
+                if len(texts) > 100:
+                    time.sleep(0.1)
                 break
-            except (APIStatusError, APITimeoutError, APIConnectionError):
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                if "429" in exc_str or "ratelimit" in exc_str:
+                    _backoff_on_rate_limit(exc, attempt)
+                    continue
                 if attempt == retries - 1:
                     raise
-                backoff(attempt)
+                time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+
     return out

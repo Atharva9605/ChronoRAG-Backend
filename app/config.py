@@ -9,13 +9,25 @@ class Settings(BaseSettings):
         env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # Azure OpenAI
-    azure_openai_endpoint: str
-    azure_openai_api_key: str
+    # Universal Model Configuration (LiteLLM Gateway & Any Provider)
+    llm_model: str = ""
+    embed_model: str = ""
+    embed_dim: int = 1536
+
+    # Azure OpenAI (Legacy / Standard)
+    azure_openai_endpoint: str = ""
+    azure_openai_api_key: str = ""
     azure_openai_api_version: str = "2024-10-21"
     azure_chat_deployment: str = "gpt-4o"
     azure_embed_deployment: str = "text-embedding-3-small"
-    embed_dim: int = 1536
+
+    # Direct Provider Keys / LiteLLM Proxy
+    openai_api_key: str = ""
+    gemini_api_key: str = ""
+    anthropic_api_key: str = ""
+    groq_api_key: str = ""
+    litellm_api_base: str = ""
+    litellm_api_key: str = ""
 
     # Stores
     pg_dsn: str
