@@ -6,10 +6,10 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import db, jobs, llm, naive_rag
+from . import db, jobs, llm, naive_rag, kaalkram
 from .config import settings
 from .ingest import doc_id_for, extract_pages
-from .schemas import DocumentOut, JobOut
+from .schemas import CompareResponse, DocumentOut, JobOut
 
 
 @asynccontextmanager
@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
     db.close()
 
 
-app = FastAPI(title="ChronoRAG API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="ChronoRAG API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -83,7 +83,8 @@ async def list_documents():
     with db.pg() as cur:
         cur.execute(
             """SELECT d.id, d.title, d.filename, d.page_count,
-                      (SELECT count(*) FROM naive_chunks n WHERE n.doc_id = d.id) AS chunks
+                      (SELECT count(*) FROM naive_chunks n WHERE n.doc_id = d.id) AS chunks,
+                      (SELECT count(*) FROM events e WHERE e.doc_id = d.id) AS events
                FROM documents d ORDER BY d.uploaded_at DESC"""
         )
         rows = cur.fetchall()
@@ -92,6 +93,8 @@ async def list_documents():
             id=r["id"], title=r["title"], filename=r["filename"],
             page_count=r["page_count"],
             naive_ready=r["chunks"] > 0,
+            kaalkram_ready=r["events"] > 0,
+            event_count=r["events"],
         )
         for r in rows
     ]
@@ -111,11 +114,11 @@ async def delete_document(doc_id: str):
 # ------------------------------------------------------------
 @app.post("/api/documents/{doc_id}/build/{kind}", response_model=JobOut)
 async def build(doc_id: str, kind: str, bg: BackgroundTasks):
-    if kind != "naive":
-        raise HTTPException(400, "kind must be 'naive'")
+    if kind not in ("naive", "kaalkram"):
+        raise HTTPException(400, "kind must be 'naive' or 'kaalkram'")
     doc_pages(doc_id)                      # 404s if unknown
     job_id = jobs.create(doc_id, kind)
-    bg.add_task(jobs.run_naive, job_id, doc_id)
+    bg.add_task(jobs.run_naive if kind == "naive" else jobs.run_kaalkram, job_id, doc_id)
     return JobOut(**{**jobs.get(job_id), "detail": {}})
 
 
@@ -132,7 +135,7 @@ async def job_status(job_id: str):
 
 @app.get("/api/documents/{doc_id}/jobs")
 async def doc_jobs(doc_id: str):
-    return {"naive": jobs.latest(doc_id, "naive")}
+    return {k: jobs.latest(doc_id, k) for k in ("naive", "kaalkram")}
 
 
 # ------------------------------------------------------------
@@ -150,6 +153,47 @@ async def ask_naive(doc_id: str, body: Ask):
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
+
+
+@app.post("/api/documents/{doc_id}/ask/kaalkram")
+async def ask_kaalkram(doc_id: str, body: Ask):
+    try:
+        return kaalkram.answer_query(doc_id, body.question)
+    except llm.ContentFilterError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
+
+
+@app.post("/api/documents/{doc_id}/compare", response_model=CompareResponse)
+async def compare(doc_id: str, body: Ask):
+    try:
+        naive = naive_rag.answer(doc_id, body.question)
+        kaal = kaalkram.answer_query(doc_id, body.question)
+    except llm.ContentFilterError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
+    with db.pg() as cur:
+        cur.execute(
+            """INSERT INTO query_runs
+               (doc_id, question, naive_answer, naive_ms, naive_tokens,
+                kaal_answer, kaal_ms, kaal_tokens)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (doc_id, body.question, naive.answer, naive.latency_ms,
+             naive.prompt_tokens + naive.completion_tokens,
+             kaal.answer, kaal.latency_ms,
+             kaal.prompt_tokens + kaal.completion_tokens),
+        )
+    return CompareResponse(question=body.question, naive=naive, kaalkram=kaal)
+
+
+# ------------------------------------------------------------
+# Graph
+# ------------------------------------------------------------
+@app.get("/api/documents/{doc_id}/graph")
+async def event_graph(doc_id: str):
+    return kaalkram.get_graph(doc_id)
 
 
 @app.get("/api/health")

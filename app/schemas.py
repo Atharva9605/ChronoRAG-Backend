@@ -10,6 +10,8 @@ class DocumentOut(BaseModel):
     filename: str
     page_count: int
     naive_ready: bool = False
+    kaalkram_ready: bool = False
+    event_count: int = 0
 
 
 class JobOut(BaseModel):
@@ -37,3 +39,9 @@ class PipelineAnswer(BaseModel):
     citations: list[Citation] = []
     retrieved: list[dict] = []
     trace: list[str] = []
+
+
+class CompareResponse(BaseModel):
+    question: str
+    naive: PipelineAnswer
+    kaalkram: PipelineAnswer

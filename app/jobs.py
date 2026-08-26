@@ -74,3 +74,28 @@ def run_naive(job_id: str, doc_id: str) -> None:
     except Exception as exc:
         traceback.print_exc()
         update(job_id, status="error", error=f"{type(exc).__name__}: {exc}")
+
+
+def run_kaalkram(job_id: str, doc_id: str) -> None:
+    from . import kaalkram
+    from .main import doc_pages
+    try:
+        update(job_id, status="running", stage="initializing rolling windows", progress=0.02)
+        pages = doc_pages(doc_id)
+        
+        stats = kaalkram.build_timeline(
+            doc_id=doc_id,
+            pages=pages,
+            on_progress=lambda p, msg: update(job_id, progress=p, stage=msg),
+        )
+        
+        update(
+            job_id,
+            status="done",
+            stage="complete",
+            progress=1.0,
+            detail=stats,
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        update(job_id, status="error", error=f"{type(exc).__name__}: {exc}")
