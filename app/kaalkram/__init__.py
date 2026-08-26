@@ -82,3 +82,22 @@ def answer_query(doc_id: str, question: str):
 def get_graph(doc_id: str):
     """Retrieve full event graph for UI."""
     return graph.fetch_graph(doc_id)
+
+
+def get_events(doc_id: str) -> list[dict]:
+    """Retrieve all chronological events for document."""
+    from ..db import pg
+    with pg() as cur:
+        cur.execute(
+            """
+            SELECT id, event_name, category, chronological_clue AS timeline_anchor,
+                   topological_order AS stage_order, location, characters,
+                   core_event, antecedent_cause, consequent_effect,
+                   source_pages, first_page, merge_count
+            FROM events
+            WHERE doc_id = %s
+            ORDER BY topological_order, first_page
+            """,
+            (doc_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]

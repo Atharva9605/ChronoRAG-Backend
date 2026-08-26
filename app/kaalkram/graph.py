@@ -182,9 +182,31 @@ def fetch_graph(doc_id: str) -> dict:
                     "relation": r.get("relation_type", "HAPPENS_BEFORE"),
                 })
 
-        nodes = list(nodes_dict.values())
-        nodes.sort(key=lambda x: x["topological_order"])
-        return {"nodes": nodes, "links": links}
+        nodes = []
+        for n in nodes_dict.values():
+            category = "major" if n.get("classification") == "story_progression" else "minor"
+            nodes.append({
+                "id": n["id"],
+                "name": n.get("name", "Event"),
+                "category": category,
+                "anchor": n.get("temporal_anchor", ""),
+                "stage_order": n.get("topological_order", 0),
+                "first_page": n.get("page_start", 0),
+                "pages": n.get("pages", []),
+                "core": n.get("summary", ""),
+            })
+
+        edges = []
+        for r in links:
+            edges.append({
+                "src": r["source"],
+                "dst": r["target"],
+                "confidence": 1.0,
+                "kind": "causal" if r.get("relation") == "CAUSES" else "temporal",
+            })
+
+        nodes.sort(key=lambda x: x["stage_order"])
+        return {"nodes": nodes, "edges": edges, "links": links}
 
 
 def neighbours(seed_ids: list[str], hops: int = 1) -> list[str]:

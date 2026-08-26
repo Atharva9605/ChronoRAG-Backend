@@ -189,8 +189,13 @@ async def compare(doc_id: str, body: Ask):
 
 
 # ------------------------------------------------------------
-# Graph
+# Timeline & Graph
 # ------------------------------------------------------------
+@app.get("/api/documents/{doc_id}/events")
+async def document_events(doc_id: str):
+    return kaalkram.get_events(doc_id)
+
+
 @app.get("/api/documents/{doc_id}/graph")
 async def event_graph(doc_id: str):
     return kaalkram.get_graph(doc_id)
