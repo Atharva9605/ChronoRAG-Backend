@@ -137,7 +137,7 @@ def answer(doc_id: str, question: str, k: int = 12) -> PipelineAnswer:
         citations=[Citation(label=e["event_name"], pages=e["source_pages"]) for e in cited],
         retrieved=[
             {"rank": i + 1, "id": e["id"], "name": e["event_name"],
-             "stage": e["timeline_anchor"], "category": e["category"],
+             "stage": e.get("chronological_clue", ""), "category": e["category"],
              "pages": e["source_pages"], "preview": e["core_event"][:280]}
             for i, e in enumerate(pool)
         ],
