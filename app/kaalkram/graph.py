@@ -23,27 +23,35 @@ def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
             "rel": "HAPPENS_BEFORE",
         })
 
-    # 2. Connect explicit preceding references
+    # 2. Connect explicit preceding references (strict word matching)
     for e in events:
         ref = (e.get("preceding_event_reference") or "").lower().strip()
-        if ref and ref != "none":
-            # Match by name substring
+        if ref and ref not in ("none", "n/a", "null") and len(ref) > 8:
+            best_match_id = None
+            best_overlap = 0
+            ref_words = set(ref.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
+            
             for name, prior_id in name_map.items():
-                if name in ref or ref in name:
-                    if prior_id != e["id"]:
-                        edges.append({
-                            "src": prior_id,
-                            "dst": e["id"],
-                            "rel": "CAUSES",
-                        })
-                    break
+                if prior_id == e["id"]:
+                    continue
+                name_words = set(name.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
+                overlap = len(ref_words & name_words)
+                if overlap >= 2 and overlap > best_overlap:
+                    best_overlap = overlap
+                    best_match_id = prior_id
+            
+            if best_match_id:
+                edges.append({
+                    "src": best_match_id,
+                    "dst": e["id"],
+                    "rel": "CAUSES",
+                })
 
-    # 3. Handle Flashbacks: Flashbacks occurred chronologically BEFORE the story events
+    # 3. Handle Flashbacks: Flashbacks occurred chronologically BEFORE forward narrative
     flashbacks = [e for e in events if e["classification"] in ("flashback", "backstory")]
     if story_events and flashbacks:
         first_story_event = story_events[0]
         for fb in flashbacks:
-            # Place flashback before the start of the forward narrative
             edges.append({
                 "src": fb["id"],
                 "dst": first_story_event["id"],
@@ -52,11 +60,35 @@ def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
 
     # Deduplicate edges
     seen_edges = set()
-    unique_edges = []
+    raw_edges = []
     for edge in edges:
-        key = (edge["src"], edge["dst"], edge["rel"])
+        key = (edge["src"], edge["dst"])
         if key not in seen_edges and edge["src"] != edge["dst"]:
             seen_edges.add(key)
+            raw_edges.append(edge)
+
+    # Transitive Reduction: Remove direct edge (u -> v) if there is an alternate path from u to v
+    adj_graph = defaultdict(set)
+    for edge in raw_edges:
+        adj_graph[edge["src"]].add(edge["dst"])
+
+    def has_alternate_path(start: str, target: str) -> bool:
+        queue = deque([nbr for nbr in adj_graph[start] if nbr != target])
+        visited = set(queue)
+        while queue:
+            curr = queue.popleft()
+            if curr == target:
+                return True
+            for nxt in adj_graph[curr]:
+                if nxt not in visited:
+                    visited.add(nxt)
+                    queue.append(nxt)
+        return False
+
+    unique_edges = []
+    for edge in raw_edges:
+        src, dst = edge["src"], edge["dst"]
+        if not has_alternate_path(src, dst):
             unique_edges.append(edge)
 
     # 4. Topological Sort (Kahn's Algorithm with cycle resolution)
