@@ -9,20 +9,20 @@ from .schemas import GlobalTimelineOrderingResponse
 
 logger = logging.getLogger(__name__)
 
-ORDERING_SYSTEM_PROMPT = """You are an expert literary chronologist specializing in true narrative timeline ordering.
+ORDERING_SYSTEM_PROMPT = """You are an expert narrative chronologist specializing in true timeline reconstruction.
 
-You are given a comprehensive list of all events extracted from a book.
-Your task is to organize these events into their TRUE STORY-WORLD CHRONOLOGICAL ORDER (Fabula), not just the order they were printed on the page.
+You are given a comprehensive list of all events extracted from a document or book.
+Your task is to organize these events into their TRUE CHRONOLOGICAL ORDER (Fabula), representing the actual historical/narrative time they occurred, not merely the order they were printed on the page.
 
 CRITICAL CHRONOLOGY RULES:
-1. TRUE STORY-TIME VS BOOK PAGES:
-   - If an event is a flashback, character memory, or backstory occurring in the past (e.g. Santiago's youth voyages to Africa, his arm-wrestling match in Casablanca), it MUST be placed in the past BEFORE the present-day novella storyline starts.
-   - The present-day narrative (Day 1 at the Terrace -> Rowing out on Day 2 -> The 3-day battle with the marlin -> Shark attacks -> Return to shore) must flow in forward chronological sequence.
+1. TRUE STORY-TIME VS DOCUMENT PRINT ORDER:
+   - If an event is a flashback, historical memory, origin backstory, or prior life milestone that occurred in the past, it MUST be placed in its true past position BEFORE the primary real-time storyline begins.
+   - The primary real-time narrative must flow forward in strict sequential chronological order.
 2. STRICT UNIQUE RANKS:
    - Assign every single event an exact integer `chronological_rank` starting at 1, 2, 3, ... up to N.
    - Every event ID provided in the input MUST be included in the output.
 3. RATIONALE:
-   - For every event, provide a 1-sentence `chronological_rationale` explaining why it occurs at this position in true story time.
+   - For every event, provide a 1-sentence `chronological_rationale` explaining why it occurs at this position in true chronology.
 """
 
 
