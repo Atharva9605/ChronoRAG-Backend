@@ -77,8 +77,8 @@ def summarise(doc_id: str, gold: list[str] | None = None) -> dict:
         "naive_chunks": chunks,
         "pass1_windows": obs,
         "stage_distribution": {
-            s: sum(1 for e in events if e["timeline_anchor"] == s)
-            for s in {e["timeline_anchor"] for e in events}
+            s: sum(1 for e in events if e.get("chronological_clue") == s)
+            for s in {e.get("chronological_clue") for e in events if e.get("chronological_clue")}
         },
         "query_runs": q["runs"] or 0,
         "avg_naive_ms": round(q["n_ms"] or 0),

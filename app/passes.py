@@ -186,7 +186,7 @@ def run_pass2(doc_id: str, observations: list[dict], on_progress=None) -> list[d
                 best_sim = sim
                 best_match_idx = e_idx
         
-        if best_sim > 0.92:  # Much higher threshold for deduplication
+        if best_sim > 0.98:  # Very high threshold because ada-002 clusters tightly
             target = events[best_match_idx]
             target["source_pages"] = sorted(set(target["source_pages"] + pages))
             if e.antecedent_cause and e.antecedent_cause not in target["antecedent_cause"]:
