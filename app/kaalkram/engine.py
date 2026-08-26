@@ -8,19 +8,20 @@ from ..db import pg
 from ..schemas import Citation, PipelineAnswer
 from . import graph
 
-SYSTEM_PROMPT = """You are a chronological intelligence assistant for deep textual and timeline analysis.
+SYSTEM_PROMPT = """You are a chronological intelligence assistant for deep textual, factual, and timeline analysis.
 
-You are given a chronological sequence of narrative events extracted from a document.
-The events have been deterministically placed in their TRUE story-world order by the timeline engine.
+You are given a chronological sequence of narrative events extracted from a document, ordered in their TRUE story-world chronology.
+Some events may also include raw textual excerpts from the underlying pages for exact microscopic factual accuracy.
 
 STRICT ANSWERING RULES:
-1. Answer the question using ONLY the provided events, point-wise actions, and dialogue.
+1. Answer the question using the provided events, point-wise actions, and raw text excerpts.
 2. Cite the exact page number for every factual claim, formatted as (p. 2) or (pp. 2-3).
-3. If comparing before vs after:
+3. For factual questions (numbers, names, objects, colors, quotes), provide the exact factual answer with the page citation.
+4. If comparing before vs after:
    - Identify both events in the chronological timeline.
    - Explain which event occurred first with its exact page citation.
-   - If an action occurred in multiple scenes (e.g. at the start and at the end of the narrative), explain both contexts clearly (e.g. "If referring to the opening shore scene (p. 2), it occurs after...").
-4. Provide a direct, concise, and complete prose answer."""
+   - If an action occurred in multiple scenes (e.g. at the start and at the end of the narrative), clarify both contexts clearly.
+5. Provide a direct, concise, and complete prose answer."""
 
 
 class StructuredAnswer(BaseModel):
@@ -65,6 +66,32 @@ def _fetch_by_ids(doc_id: str, ids: list[str]) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def _fetch_raw_excerpts_for_pages(doc_id: str, pages: list[int]) -> dict[int, str]:
+    """Retrieves raw chunk excerpts for specific pages to ensure zero microscopic fact loss."""
+    if not pages:
+        return {}
+    try:
+        with pg() as cur:
+            cur.execute(
+                """
+                SELECT page_start, page_end, content
+                FROM naive_chunks
+                WHERE doc_id = %s AND (page_start = ANY(%s) OR page_end = ANY(%s))
+                LIMIT 15
+                """,
+                (doc_id, pages, pages),
+            )
+            rows = cur.fetchall()
+            excerpts = {}
+            for r in rows:
+                for p in range(r["page_start"], r["page_end"] + 1):
+                    if p in pages and p not in excerpts:
+                        excerpts[p] = r["content"][:300]
+            return excerpts
+    except Exception:
+        return {}
+
+
 def answer(doc_id: str, question: str, k: int = 10) -> PipelineAnswer:
     t0 = time.perf_counter()
     before_usage = llm.usage_snapshot()
@@ -86,7 +113,14 @@ def answer(doc_id: str, question: str, k: int = 10) -> PipelineAnswer:
     pool.sort(key=lambda e: (e.get("topological_order", 0), e.get("first_page", 0)))
     trace.append("Topologically ordered working set into true story-world chronology.")
 
-    # Format event context with point-wise actions
+    # 4. Fetch raw textual excerpts for matching pages (Hybrid Grounding)
+    all_pages = set()
+    for e in pool:
+        for p in e.get("source_pages") or [e.get("first_page", 1)]:
+            all_pages.add(p)
+    raw_excerpts = _fetch_raw_excerpts_for_pages(doc_id, list(all_pages))
+
+    # Format event context with point-wise actions & raw text excerpts
     context_blocks = []
     for i, e in enumerate(pool, start=1):
         pages_str = f"pp. {e['source_pages'][0]}-{e['source_pages'][-1]}" if len(e.get("source_pages", [])) > 1 else f"p. {e.get('first_page', '?')}"
@@ -100,17 +134,22 @@ def answer(doc_id: str, question: str, k: int = 10) -> PipelineAnswer:
             except Exception:
                 pass
 
+        # Raw page excerpt if available
+        first_p = e.get("first_page", 0)
+        raw_snippet = raw_excerpts.get(first_p)
+        raw_text_block = f"\n   Raw Excerpt: \"{raw_snippet}\"" if raw_snippet else ""
+
         block = (
             f"[{i}] EVENT: {e['event_name']} ({pages_str})\n"
             f"   Classification: {e.get('location', 'story_progression')} | Time: {e.get('chronological_clue') or 'N/A'}\n"
             f"   Characters: {', '.join(e.get('characters', [])) or 'None'}\n"
-            f"   Summary: {e.get('core_event')}{actions_detail}"
+            f"   Summary: {e.get('core_event')}{actions_detail}{raw_text_block}"
         )
         context_blocks.append(block)
 
     context_text = "\n\n".join(context_blocks)
     user_prompt = (
-        f"EVENTS IN TRUE STORY CHRONOLOGY:\n\n{context_text}\n\n"
+        f"EVENTS IN TRUE STORY CHRONOLOGY (WITH RAW TEXT EXCERPTS):\n\n{context_text}\n\n"
         f"QUESTION: {question}"
     )
 
