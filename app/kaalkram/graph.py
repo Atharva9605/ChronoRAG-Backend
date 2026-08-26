@@ -45,11 +45,23 @@ def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
             return True
         return False
 
-    # 1. Forward linear narrative chain: connect each event to the next in sequence
-    for i in range(len(events) - 1):
-        add_edge(events[i]["id"], events[i + 1]["id"], "HAPPENS_BEFORE")
+    # 1. Separate forward narrative events from past flashbacks/backstories
+    story_events = [e for e in events if e.get("classification") == "story_progression"]
+    flashback_events = [e for e in events if e.get("classification") in ("flashback", "backstory")]
 
-    # 2. Causal / Explicit cross-references
+    # 2. Chain flashbacks/backstories in the chronological past
+    if flashback_events:
+        for i in range(len(flashback_events) - 1):
+            add_edge(flashback_events[i]["id"], flashback_events[i + 1]["id"], "HAPPENS_BEFORE")
+        # Connect the last flashback into the start of the forward narrative
+        if story_events:
+            add_edge(flashback_events[-1]["id"], story_events[0]["id"], "HAPPENS_BEFORE")
+
+    # 3. Connect forward story progression sequentially
+    for i in range(len(story_events) - 1):
+        add_edge(story_events[i]["id"], story_events[i + 1]["id"], "HAPPENS_BEFORE")
+
+    # 4. Causal / Explicit cross-references
     for e in events:
         ref = (e.get("preceding_event_reference") or "").lower().strip()
         if ref and ref not in ("none", "n/a", "null") and len(ref) > 6:
@@ -60,7 +72,7 @@ def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
             for name, prior_id in name_map.items():
                 if prior_id == e["id"]:
                     continue
-                # Only link forward (prior -> current)
+                # Only link forward
                 if event_index_map[prior_id] < event_index_map[e["id"]]:
                     name_words = set(name.split()) - {"the", "a", "an", "and", "of", "to", "in", "he", "she", "they"}
                     overlap = len(ref_words & name_words)
