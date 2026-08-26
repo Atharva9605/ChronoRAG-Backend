@@ -13,7 +13,10 @@ _neo4j = None
 
 
 def _configure(conn: psycopg.Connection) -> None:
-    register_vector(conn)
+    try:
+        register_vector(conn)
+    except Exception:
+        pass
 
 
 def pool() -> ConnectionPool:
@@ -23,6 +26,8 @@ def pool() -> ConnectionPool:
             settings.pg_dsn,
             min_size=1,
             max_size=settings.concurrency + 4,
+            max_lifetime=300.0,
+            check=ConnectionPool.check_connection,
             configure=_configure,
             open=True,
         )
@@ -31,10 +36,16 @@ def pool() -> ConnectionPool:
 
 @contextmanager
 def pg():
-    """Yields a dict-row cursor inside a transaction."""
+    """Yields a dict-row cursor inside a transaction with vector auto-registration."""
     with pool().connection() as conn:
-        with conn.cursor(row_factory=dict_row) as cur:
-            yield cur
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                yield cur
+        except psycopg.errors.InternalError:
+            # If postgres catalog was reset / OID changed, re-register vector and retry
+            register_vector(conn)
+            with conn.cursor(row_factory=dict_row) as cur:
+                yield cur
 
 
 def neo4j():
