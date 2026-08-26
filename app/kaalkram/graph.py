@@ -72,19 +72,16 @@ def build_timeline_graph(events: list[dict]) -> tuple[list[dict], list[str]]:
             if best_match_id:
                 add_edge(best_match_id, e["id"], "CAUSES")
 
-    # 3. Handle Flashbacks & Backstory:
-    # If an event is a flashback within a window, it happened before the forward event that follows it
-    for i, e in enumerate(events):
-        if e.get("classification") in ("flashback", "backstory"):
-            # Find the next immediate forward story event
-            next_story = next((s for s in events[i + 1:] if s.get("classification") == "story_progression"), None)
-            if next_story:
-                add_edge(e["id"], next_story["id"], "HAPPENS_BEFORE")
-            elif story_events:
-                # If flashback is at the end, attach from previous story event
-                prev_story = next((s for s in reversed(events[:i]) if s.get("classification") == "story_progression"), None)
-                if prev_story:
-                    add_edge(prev_story["id"], e["id"], "HAPPENS_BEFORE")
+    # 3. Handle Flashbacks & Backstories:
+    # Flashbacks depict events that occurred in the character's past/youth,
+    # so chronologically they belong in the timeline BEFORE the present narrative starts (story_events[0]).
+    flashbacks = [e for e in events if e.get("classification") in ("flashback", "backstory")]
+    if story_events and flashbacks:
+        # Chain multiple flashbacks among themselves by page order
+        for i in range(len(flashbacks) - 1):
+            add_edge(flashbacks[i]["id"], flashbacks[i + 1]["id"], "HAPPENS_BEFORE")
+        # Connect the last flashback into the start of the forward story
+        add_edge(flashbacks[-1]["id"], story_events[0]["id"], "HAPPENS_BEFORE")
 
     # 4. Transitive Reduction: Remove direct edge (u -> v) if there is an alternate path
     def has_alternate_path(start: str, target: str) -> bool:
