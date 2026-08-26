@@ -10,16 +10,20 @@ from . import graph
 
 SYSTEM_PROMPT = """You are a chronological intelligence assistant for deep textual, factual, and timeline analysis.
 
-You are given a chronological sequence of narrative events extracted from a document, ordered in their TRUE story-world chronology.
+You are given a chronological sequence of narrative events extracted from a document, numbered [1], [2], ... [N] in their TRUE story-world order (from earliest in story time to latest).
 Some events may also include raw textual excerpts from the underlying pages for exact microscopic factual accuracy.
 
 STRICT ANSWERING RULES:
-1. Answer the question using the provided events, point-wise actions, and raw text excerpts.
+1. Answer the question using ONLY the provided events, point-wise actions, and raw text excerpts.
 2. Cite the exact page number for every factual claim, formatted as (p. 2) or (pp. 2-3).
 3. For factual questions (numbers, names, objects, colors, quotes), provide the exact factual answer with the page citation.
-4. If comparing before vs after:
-   - Identify both events in the chronological timeline.
-   - Explain which event occurred first with its exact page citation.
+4. When answering "Did [Event A] happen BEFORE or AFTER [Event B]?":
+   - Locate Event A and Event B in the numbered timeline list [1]...[N].
+   - If Event A is earlier in the list / has a lower timeline index / earlier page than Event B:
+     Your answer MUST state: "[Event A] happened BEFORE [Event B]."
+   - If Event A is later in the list / has a higher timeline index than Event B:
+     Your answer MUST state: "[Event A] happened AFTER [Event B]."
+   - STRICT CHRONOLOGY CHECK: A lower page/rank (e.g. pp. 90-93) is BEFORE a higher page/rank (e.g. pp. 142-145). Never invert this logic.
    - If an action occurred in multiple scenes (e.g. at the start and at the end of the narrative), clarify both contexts clearly.
 5. Provide a direct, concise, and complete prose answer."""
 
@@ -140,8 +144,8 @@ def answer(doc_id: str, question: str, k: int = 10) -> PipelineAnswer:
         raw_text_block = f"\n   Raw Excerpt: \"{raw_snippet}\"" if raw_snippet else ""
 
         block = (
-            f"[{i}] EVENT: {e['event_name']} ({pages_str})\n"
-            f"   Classification: {e.get('location', 'story_progression')} | Time: {e.get('chronological_clue') or 'N/A'}\n"
+            f"[{i}] TIMELINE RANK {e.get('topological_order', i)}: {e['event_name']} ({pages_str})\n"
+            f"   Classification: {e.get('location', 'story_progression')} | Time Context: {e.get('chronological_clue') or 'N/A'}\n"
             f"   Characters: {', '.join(e.get('characters', [])) or 'None'}\n"
             f"   Summary: {e.get('core_event')}{actions_detail}{raw_text_block}"
         )
@@ -149,7 +153,7 @@ def answer(doc_id: str, question: str, k: int = 10) -> PipelineAnswer:
 
     context_text = "\n\n".join(context_blocks)
     user_prompt = (
-        f"EVENTS IN TRUE STORY CHRONOLOGY (WITH RAW TEXT EXCERPTS):\n\n{context_text}\n\n"
+        f"EVENTS IN TRUE STORY CHRONOLOGY (EARLIEST TO LATEST):\n\n{context_text}\n\n"
         f"QUESTION: {question}"
     )
 
