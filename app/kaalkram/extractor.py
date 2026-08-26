@@ -230,9 +230,10 @@ def persist_events_to_postgres(doc_id: str, events: list[dict], on_progress=None
     if on_progress:
         on_progress(0.80, "Embedding events for semantic retrieval")
 
-    # Generate embeddings
+    # Generate embeddings with rich location and character grounding
     texts_to_embed = [
         f"{e['event_name']}: {e['summary']} "
+        f"Location: {e.get('physical_location', '')}. "
         f"Characters: {', '.join(e['characters'])}. "
         f"Actions: {' '.join(a['action'] for a in e['point_wise_actions'])}"
         for e in events
@@ -248,6 +249,7 @@ def persist_events_to_postgres(doc_id: str, events: list[dict], on_progress=None
             # category map: story_progression -> major, flashback/backstory -> minor
             category = "major" if e["classification"] == "story_progression" else "minor"
             actions_json = json.dumps(e["point_wise_actions"])
+            loc_str = f"{e.get('physical_location', '')} ({e['classification']})".strip(" ()")
             
             records.append((
                 e["id"],
@@ -256,7 +258,7 @@ def persist_events_to_postgres(doc_id: str, events: list[dict], on_progress=None
                 category,
                 e["temporal_anchor"],
                 e.get("topological_order", 0),
-                e["classification"],  # stored in location or dedicated column
+                loc_str,
                 e["characters"],
                 e["summary"],
                 e["preceding_event_reference"],

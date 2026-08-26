@@ -42,6 +42,13 @@ class ExtractedEvent(BaseModel):
     characters_involved: list[str] = Field(
         description="List of all character names present or referenced."
     )
+    physical_location: str = Field(
+        default="",
+        description=(
+            "The specific physical or geographical setting where this event occurs: "
+            "e.g., 'Ayodhya Palace', 'Panchavati Hermitage', 'Mithila Court of Janaka', 'Chitrakoota Mountain', 'Havana Shore', 'Gulf Stream at sea'."
+        ),
+    )
     temporal_anchor: str = Field(
         description="Primary explicit time marker from text (e.g., 'September 1950', 'Years ago in youth', 'Morning of Day 1', '84 days ago')."
     )
