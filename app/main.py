@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import db, evaluation, graph, jobs, llm, naive_rag, passes, query_engine
-from .config import settings, TAXONOMY
+from .config import settings
 from .ingest import doc_id_for, extract_pages
 from .schemas import CompareResponse, DocumentOut, EventOut, JobOut
 
@@ -216,11 +216,6 @@ async def observations(doc_id: str, limit: int = 20):
 @app.get("/api/documents/{doc_id}/metrics")
 async def metrics(doc_id: str):
     return evaluation.summarise(doc_id)
-
-
-@app.get("/api/taxonomy")
-async def taxonomy():
-    return {"stages": TAXONOMY}
 
 
 @app.get("/api/health")
