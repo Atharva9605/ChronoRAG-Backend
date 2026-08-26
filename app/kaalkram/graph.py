@@ -65,6 +65,7 @@ def order_timeline_with_llm(
             f"- EVENT ID: {e['id']}\n"
             f"  Name: {e['event_name']}\n"
             f"  Classification: {e.get('classification', 'story_progression')}\n"
+            f"  Era / Period: {e.get('story_era', 'Present')}\n"
             f"  Page Range: pp. {e['page_start']}-{e['page_end']}\n"
             f"  Time Anchor: {e.get('temporal_anchor') or 'Not specified'}\n"
             f"  Summary: {e['summary']}{actions_str}"
@@ -74,7 +75,7 @@ def order_timeline_with_llm(
     user_prompt = (
         f"EXTRACTED EVENTS TO ORDER CHRONOLOGICALLY ({len(events)} total events):\n\n"
         + "\n\n".join(event_blocks)
-        + "\n\nArrange all events above into their TRUE story-world chronological order from earliest to latest."
+        + "\n\nArrange all events above into their TRUE story-world chronological order from earliest past backstories/memories to the final resolution."
     )
 
     # Call LLM for global timeline ordering
@@ -98,6 +99,7 @@ def order_timeline_with_llm(
         rank_map[item.event_id] = {
             "rank": item.chronological_rank,
             "period": item.story_time_period,
+            "era": item.story_era,
             "rationale": item.chronological_rationale,
         }
 
@@ -109,6 +111,7 @@ def order_timeline_with_llm(
         if info:
             e["topological_order"] = info["rank"]
             e["story_time_period"] = info["period"]
+            e["story_era"] = info.get("era") or e.get("story_era", "Present")
             e["chronological_rationale"] = info["rationale"]
         else:
             e["topological_order"] = 1000 + i
@@ -143,6 +146,7 @@ def push_to_neo4j(doc_id: str, events: list[dict], edges: list[dict]) -> None:
                 "name": e["event_name"],
                 "summary": e["summary"],
                 "classification": e.get("classification", "story_progression"),
+                "story_era": e.get("story_era", "Present"),
                 "page_start": e["page_start"],
                 "page_end": e["page_end"],
                 "source_pages": e.get("page_numbers", []),
@@ -162,6 +166,7 @@ def push_to_neo4j(doc_id: str, events: list[dict], edges: list[dict]) -> None:
                 name: n.name,
                 summary: n.summary,
                 classification: n.classification,
+                story_era: n.story_era,
                 page_start: n.page_start,
                 page_end: n.page_end,
                 source_pages: n.source_pages,

@@ -5,13 +5,13 @@ EventClassification = Literal["story_progression", "flashback", "flash_forward",
 
 
 class PageActionItem(BaseModel):
-    page_no: int = Field(description="The exact PDF page number where this action happens.")
+    page_no: int = Field(description="The exact PDF page number where this action or dialogue happens.")
     action: str = Field(description="Specific, detailed narrative action or dialogue occurring on this page.")
 
 
 class ExtractedEvent(BaseModel):
     event_name: str = Field(
-        description="A concise 4-7 word title of the specific event or scene."
+        description="A concise 4-7 word title of the specific event, memory, or historical backstory."
     )
     classification: EventClassification = Field(
         description=(
@@ -19,11 +19,20 @@ class ExtractedEvent(BaseModel):
             "'story_progression' = real-time forward story beat; "
             "'flashback' = memory/scene from the past; "
             "'flash_forward' = foreshadowing/future scene; "
-            "'backstory' = historical exposition or lore."
+            "'backstory' = historical exposition, past expeditions, or character lore."
+        )
+    )
+    story_era: str = Field(
+        description=(
+            "The story-world era/epoch when this event actually took place: "
+            "e.g., 'Deep Past (Youth & Africa Voyages)', 'Recent Past (Early Days with Manolin & Past Streaks)', "
+            "'Present Day 1 (Shore & Shack Preparation)', 'Present Day 2 (Rowing Out & Hooking Marlin)', "
+            "'Present Day 3 (The Marlin Battle & Endurance)', 'Present Day 4 (Shark Attacks & Return)', "
+            "'Present Day 5 (Aftermath on Shore)'."
         )
     )
     summary: str = Field(
-        description="Comprehensive summary of what happens in this event, retaining all specific names, objects, quotes, and outcomes."
+        description="Comprehensive summary of what happened, retaining all specific names, numbers, objects, quotes, and outcomes."
     )
     page_start: int = Field(description="Starting PDF page number of this event.")
     page_end: int = Field(description="Ending PDF page number of this event.")
@@ -37,7 +46,7 @@ class ExtractedEvent(BaseModel):
         description="List of all character names present or referenced."
     )
     temporal_anchor: str = Field(
-        description="Explicit time marker from text (e.g., 'Morning of Day 1', '84 days ago', 'At dusk')."
+        description="Explicit time marker from text (e.g., 'When Santiago was a boy', 'Years ago in Casablanca', 'Morning of Day 1', '84 days ago')."
     )
     preceding_event_reference: str = Field(
         description="Reference or name of the prior event that directly preceded or caused this one. 'None' if starting event."
@@ -52,10 +61,10 @@ class WindowExtractionResult(BaseModel):
         description="Summary of all major developments across this 10-page window."
     )
     active_characters: list[str] = Field(
-        description="Key characters active in this slice."
+        description="Key characters active or discussed in this slice."
     )
     events: list[ExtractedEvent] = Field(
-        description="Chronologically ordered list of distinct events occurring within this window."
+        description="Chronologically ordered list of distinct events, including both real-time actions and historical memories/backstories."
     )
 
 
@@ -73,10 +82,13 @@ class RollingMemory(BaseModel):
 class OrderedTimelineEventItem(BaseModel):
     event_id: str = Field(description="The unique ID of the event being placed.")
     chronological_rank: int = Field(
-        description="Strict sequential integer rank in true story time (1 = earliest in story world / past memories, N = final resolution)."
+        description="Strict sequential integer rank in true story time (1 = earliest in history/past, N = final resolution)."
+    )
+    story_era: str = Field(
+        description="Era category (e.g. 'Deep Past', 'Recent Past', 'Day 1 Shore', 'Day 2 Hook', 'Day 3 Battle', 'Day 4 Sharks', 'Day 5 Return')."
     )
     story_time_period: str = Field(
-        description="Estimated story time period (e.g. 'Youth in Casablanca / Decades Ago', 'Day 1 Morning', 'Day 3 Night')."
+        description="Estimated story time period (e.g. 'Decades ago in Casablanca', 'Day 1 Morning', 'Day 3 Night')."
     )
     chronological_rationale: str = Field(
         description="Brief 1-sentence reason explaining why this event occurs at this specific point in story chronology."
@@ -85,7 +97,7 @@ class OrderedTimelineEventItem(BaseModel):
 
 class GlobalTimelineOrderingResponse(BaseModel):
     chronological_overview: str = Field(
-        description="High-level breakdown of the story's true chronological progression from past to present."
+        description="High-level breakdown of the story's true chronological progression across eras from past to present."
     )
     ordered_events: list[OrderedTimelineEventItem] = Field(
         description="All events ordered strictly in true story-world chronological sequence."
@@ -97,6 +109,7 @@ class TimelineGraphNode(BaseModel):
     doc_id: str
     event_name: str
     classification: str
+    story_era: str = ""
     summary: str
     page_start: int
     page_end: int

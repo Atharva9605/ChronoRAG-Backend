@@ -27,13 +27,24 @@ CRITICAL EXTRACTION RULES:
    - For every event, provide `point_wise_actions` broken down by specific page number (e.g. page_no=2, action="Santiago refuses Manolin's offer to accompany him, telling him to stay with the lucky boat.").
    - Never lose factual names, objects, or dialogue. Capture every character name (e.g. Manolin, Santiago, Martin), specific locations (e.g. The Terrace), and key actions.
 
-2. TEMPORAL CLASSIFICATION:
-   - 'story_progression': Normal real-time narrative moving forward in story time.
-   - 'flashback': A memory, reflection, or past event that occurred before the main timeline (e.g., Santiago's past trip to Africa, arm-wrestling match in Casablanca).
-   - 'flash_forward': Foreshadowing or future scenes.
-   - 'backstory': Historical exposition or character lore.
+2. EXTRACT ALL PAST EVENTS & HISTORICAL MEMORIES (CRUCIAL):
+   - You MUST extract EVERY SINGLE referenced past event, character memory, backstory, or historical expedition mentioned in the text as its own distinct event!
+   - Examples of past events to extract:
+     * Santiago sailing to Africa as a youth and seeing lions on the beach.
+     * Santiago's past arm-wrestling contest in Casablanca against the great negro of Cienfuegos.
+     * Past fishing trips with the boy when Manolin was 5 years old.
+     * Previous 87-day unlucky streak when they caught big fish for three weeks afterward.
+     * Santiago's deceased wife and her photograph.
+     * Baseball discussions and past games of Joe DiMaggio and Dick Sisler.
+   - Classify these historical events as 'flashback' or 'backstory' and set their `story_era` to 'Deep Past' or 'Recent Past'.
 
-3. CONTINUITY WITH PREVIOUS WINDOWS:
+3. TEMPORAL CLASSIFICATION:
+   - 'story_progression': Normal real-time narrative moving forward in story time.
+   - 'flashback': A memory, reflection, or past event that occurred before the main timeline.
+   - 'flash_forward': Foreshadowing or future scenes.
+   - 'backstory': Historical exposition, past lore, or prior life milestones.
+
+4. CONTINUITY WITH PREVIOUS WINDOWS:
    - Use the provided 'STORY CONTEXT & ROLLING MEMORY SO FAR' to maintain continuity.
    - If an event is a continuation of an ongoing action from previous pages, reference the preceding event in `preceding_event_reference`.
    - If this window is the beginning of the book, set `preceding_event_reference` to 'None'.
@@ -144,6 +155,7 @@ def extract_timeline_events(
                 "doc_id": doc_id,
                 "event_name": ev.event_name,
                 "classification": ev.classification,
+                "story_era": ev.story_era or "Present",
                 "summary": ev.summary,
                 "page_start": ev.page_start,
                 "page_end": ev.page_end,
