@@ -46,7 +46,13 @@ class ExtractedEvent(BaseModel):
         description="List of all character names present or referenced."
     )
     temporal_anchor: str = Field(
-        description="Explicit time marker from text (e.g., 'When Santiago was a boy', 'Years ago in Casablanca', 'Morning of Day 1', '84 days ago')."
+        description="Primary explicit time marker from text (e.g., 'September 1950', 'Years ago in youth', 'Morning of Day 1', '84 days ago')."
+    )
+    exact_dates_and_timestamps: list[str] = Field(
+        description="All explicit dates, calendar years, seasons, times of day (e.g. 'dawn', 'sunset', 'noon'), or durations (e.g. 'two hours later', 'for three days') mentioned."
+    )
+    relative_time_context: str = Field(
+        description="Precise chronological placement relative to the surrounding story (e.g. 'Occurs the morning after the shack discussion', 'Occurred 20 years before the main story')."
     )
     preceding_event_reference: str = Field(
         description="Reference or name of the prior event that directly preceded or caused this one. 'None' if starting event."

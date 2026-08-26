@@ -28,18 +28,23 @@ CRITICAL EXTRACTION RULES:
    - For every event, provide `point_wise_actions` broken down by specific page number (e.g. page_no=N, action="...").
    - NEVER lose specific entity names, dates, quotes, numbers, dialogue, or locations. Capture every specific character/entity, setting, and concrete action.
 
-2. EXTRACT ALL PAST EVENTS, MEMORIES & HISTORICAL BACKSTORY:
+2. EXTRACT ALL DATES, TIMESTAMPS & RELATIVE CHRONOLOGY (CRITICAL):
+   - For every single event, extract EVERY explicit date, calendar year, month, season, time of day (e.g. dawn, noon, dusk, midnight), elapsed duration (e.g. '84 days', 'two hours later'), or day counter.
+   - Record these in `exact_dates_and_timestamps`.
+   - Provide a clear `relative_time_context` describing when this event takes place relative to the rest of the narrative.
+
+3. EXTRACT ALL PAST EVENTS, MEMORIES & HISTORICAL BACKSTORY:
    - You MUST extract EVERY referenced historical event, character memory, backstory, prior milestone, or past exposition mentioned in the text as its own distinct event.
    - Any event describing something that occurred before the primary real-time narrative (e.g. youth memories, historical origins, prior life events, past disputes/agreements) MUST be extracted as an event.
    - Classify historical/prior events as 'flashback' or 'backstory' and set their `story_era` to 'Deep Past' or 'Recent Past'.
 
-3. TEMPORAL CLASSIFICATION:
+4. TEMPORAL CLASSIFICATION:
    - 'story_progression': Normal real-time narrative moving forward in the main timeline.
    - 'flashback': A memory, reflection, or scene depicting events from the past.
    - 'flash_forward': Foreshadowing, predictions, or future scenes.
    - 'backstory': Historical exposition, background lore, or prior life milestones.
 
-4. CONTINUITY WITH PREVIOUS WINDOWS:
+5. CONTINUITY WITH PREVIOUS WINDOWS:
    - Use the provided 'STORY CONTEXT & ROLLING MEMORY SO FAR' to maintain continuity.
    - If an event is a continuation of an ongoing action from previous pages, reference the preceding event in `preceding_event_reference`.
    - If this window is the beginning of the document, set `preceding_event_reference` to 'None'.
@@ -158,6 +163,8 @@ def extract_timeline_events(
                 "point_wise_actions": action_items,
                 "characters": ev.characters_involved,
                 "temporal_anchor": ev.temporal_anchor or "",
+                "exact_dates_and_timestamps": ev.exact_dates_and_timestamps or [],
+                "relative_time_context": ev.relative_time_context or "",
                 "preceding_event_reference": ev.preceding_event_reference or "None",
                 "consequence_or_effect": ev.consequence_or_effect or "",
                 "window_index": win["window_index"],

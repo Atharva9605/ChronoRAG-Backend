@@ -61,6 +61,9 @@ def order_timeline_with_llm(
                 f"[p. {a['page_no']}] {a['action']}" for a in e["point_wise_actions"]
             )
         
+        timestamps_str = ", ".join(e.get("exact_dates_and_timestamps", [])) or "None"
+        rel_context = e.get("relative_time_context") or "N/A"
+        
         block = (
             f"- EVENT ID: {e['id']}\n"
             f"  Name: {e['event_name']}\n"
@@ -68,6 +71,8 @@ def order_timeline_with_llm(
             f"  Era / Period: {e.get('story_era', 'Present')}\n"
             f"  Page Range: pp. {e['page_start']}-{e['page_end']}\n"
             f"  Time Anchor: {e.get('temporal_anchor') or 'Not specified'}\n"
+            f"  Dates / Timestamps: {timestamps_str}\n"
+            f"  Relative Chronology: {rel_context}\n"
             f"  Summary: {e['summary']}{actions_str}"
         )
         event_blocks.append(block)
