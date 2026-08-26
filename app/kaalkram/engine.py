@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from pgvector.psycopg import Vector
 from pydantic import BaseModel, Field
@@ -101,9 +102,23 @@ def answer(doc_id: str, question: str, k: int = 10) -> PipelineAnswer:
     before_usage = llm.usage_snapshot()
     trace: list[str] = []
 
-    # 1. Semantic search for candidate seed events
-    seeds = search_events(doc_id, question, k=k)
-    trace.append(f"Identified {len(seeds)} candidate events by semantic similarity.")
+    # 1. Multi-clause query decomposition for before/after questions
+    clauses = [question]
+    if "before or after" in question.lower():
+        parts = re.split(r"before or after", question, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            clauses.append(parts[0].strip())
+            clauses.append(parts[1].strip())
+
+    seen_ids = set()
+    seeds = []
+    for cl in clauses:
+        for ev in search_events(doc_id, cl, k=k):
+            if ev["id"] not in seen_ids:
+                seen_ids.add(ev["id"])
+                seeds.append(ev)
+
+    trace.append(f"Identified {len(seeds)} candidate events across {len(clauses)} query perspective(s).")
 
     # 2. Graph expansion (1 hop along temporal DAG)
     seed_ids = [s["id"] for s in seeds]

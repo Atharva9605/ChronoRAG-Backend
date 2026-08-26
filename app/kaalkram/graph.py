@@ -118,17 +118,21 @@ def _order_hierarchical(
         era = e.get("story_era") or "Present Storyline"
         era_groups[era].append(e)
 
-    # 1. Order eras globally
-    distinct_eras = list(era_groups.keys())
+    # 1. Order eras globally (pre-sorted by earliest appearance)
+    distinct_eras = sorted(
+        list(era_groups.keys()),
+        key=lambda era: min((ev.get("first_page", 0) or ev.get("page_start", 0)) for ev in era_groups[era])
+    )
     era_list_str = "\n".join(
-        f"- Era: '{era}' ({len(era_groups[era])} events spanning pages {min(ev['page_start'] for ev in era_groups[era])}-{max(ev['page_end'] for ev in era_groups[era])})"
+        f"- Era: '{era}' ({len(era_groups[era])} events spanning pages {min(ev.get('first_page', 0) for ev in era_groups[era])}-{max(ev.get('first_page', 0) for ev in era_groups[era])})"
         for era in distinct_eras
     )
     
     macro_prompt = (
         f"STORY ERAS IDENTIFIED ACROSS DOCUMENT ({len(distinct_eras)} total eras):\n\n"
         + era_list_str
-        + "\n\nOrder these eras into their TRUE story-world chronological sequence from earliest historical past to final resolution."
+        + "\n\nOrder these eras into their TRUE story-world chronological sequence from earliest historical past to final resolution.\n"
+        + "If an era represents a historical backstory or youth memory recounted later, place it in the PAST before the present narrative."
     )
 
     macro_res: MacroEraOrderingResponse = llm.chat_structured(
@@ -154,6 +158,9 @@ def _order_hierarchical(
         era_events = era_groups.get(era_name, [])
         if not era_events:
             continue
+
+        # Sort era events by actual appearance before sub-batching
+        era_events.sort(key=lambda ev: (ev.get("first_page", 0), ev.get("page_start", 0)))
 
         if on_progress:
             on_progress(0.88, f"Ordering events in era: {era_name} ({len(era_events)} events)")
