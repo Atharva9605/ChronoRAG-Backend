@@ -1,6 +1,8 @@
+import json
 import logging
 from typing import Callable
 
+from ..config import settings
 from . import engine, extractor, graph
 from .schemas import ExtractedEvent, WindowExtractionResult, RollingMemory
 
@@ -18,8 +20,9 @@ def build_timeline(
     2. Zero-cost causal & temporal graph DAG construction.
     3. Topological ordering via Kahn's algorithm.
     4. PostgreSQL (pgvector) + Neo4j persistence.
+    5. JSON checkpoints saved to data/cache/.
     """
-    # 1. Extraction with Rolling Memory
+    # 1. Extraction with Rolling Memory and Window Checkpoints
     events = extractor.extract_timeline_events(doc_id, pages, on_progress=on_progress)
     
     if on_progress:
@@ -39,6 +42,26 @@ def build_timeline(
     # 3. Persistence
     extractor.persist_events_to_postgres(doc_id, events, on_progress=on_progress)
     graph.push_to_neo4j(doc_id, events, edges)
+    
+    # Save graph & topological order checkpoint
+    try:
+        cache_dir = settings.cache_path
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        graph_checkpoint_file = cache_dir / f"{doc_id}_checkpoint_graph_and_topology.json"
+        graph_payload = {
+            "doc_id": doc_id,
+            "total_events": len(events),
+            "total_edges": len(edges),
+            "topological_sequence": topo_order,
+            "edges": edges,
+            "events_ordered": sorted(events, key=lambda x: x["topological_order"]),
+        }
+        graph_checkpoint_file.write_text(
+            json.dumps(graph_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to write graph checkpoint: {exc}")
     
     story_count = sum(1 for e in events if e.get("classification") == "story_progression")
     flashback_count = len(events) - story_count

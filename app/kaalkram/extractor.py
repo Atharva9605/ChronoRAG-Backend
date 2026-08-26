@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Callable
 
 from pgvector.psycopg import Vector
@@ -37,6 +38,17 @@ CRITICAL EXTRACTION RULES:
    - If an event is a continuation of an ongoing action from previous pages, reference the preceding event in `preceding_event_reference`.
    - If this window is the beginning of the book, set `preceding_event_reference` to 'None'.
 """
+
+
+def _save_json_checkpoint(filename: str, data: dict) -> None:
+    """Helper to save inspection checkpoints to cache directory."""
+    try:
+        cache_dir = settings.cache_path
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target_file = cache_dir / filename
+        target_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to write checkpoint {filename}: {e}")
 
 
 def build_sliding_windows(pages: list[str], window_size: int = 10, overlap: int = 2) -> list[dict]:
@@ -76,6 +88,7 @@ def extract_timeline_events(
 ) -> list[dict]:
     """
     Extracts chronological events using sequential rolling memory across sliding windows.
+    Checkpoints every window's response and state to data/cache/.
     """
     windows = build_sliding_windows(pages, window_size=10, overlap=2)
     total_windows = len(windows)
@@ -171,6 +184,24 @@ def extract_timeline_events(
         memory.active_characters = list(set(memory.active_characters + result.active_characters))
         memory.recent_events_summary.extend(window_event_dicts)
         
+        # Save inspection checkpoint for this window
+        checkpoint_payload = {
+            "window_index": win["window_index"],
+            "page_range": f"{win['page_start']}-{win['page_end']}",
+            "rolling_memory_prompt_sent": memory_context,
+            "window_summary_extracted": result.window_summary,
+            "active_characters_extracted": result.active_characters,
+            "events_extracted_count": len(result.events),
+            "events": [e.model_dump() for e in result.events],
+            "rolling_memory_state_after_window": memory.model_dump(),
+        }
+        _save_json_checkpoint(
+            f"{doc_id}_checkpoint_window_{win['window_index']:02d}_pages_{win['page_start']}_to_{win['page_end']}.json",
+            checkpoint_payload,
+        )
+        
+    # Save overall all-events checkpoint
+    _save_json_checkpoint(f"{doc_id}_checkpoint_all_events.json", all_events)
     return all_events
 
 
