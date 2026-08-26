@@ -1,17 +1,21 @@
 import json
 import logging
+from collections import defaultdict
 from typing import Callable
 
 from .. import llm
 from ..config import settings
 from ..db import neo4j
-from .schemas import GlobalTimelineOrderingResponse
+from .schemas import (
+    GlobalTimelineOrderingResponse,
+    MacroEraOrderingResponse,
+)
 
 logger = logging.getLogger(__name__)
 
 ORDERING_SYSTEM_PROMPT = """You are an expert narrative chronologist specializing in true timeline reconstruction.
 
-You are given a comprehensive list of all events extracted from a document or book.
+You are given a list of events extracted from a document or book.
 Your task is to organize these events into their TRUE CHRONOLOGICAL ORDER (Fabula), representing the actual historical/narrative time they occurred, not merely the order they were printed on the page.
 
 CRITICAL CHRONOLOGY RULES:
@@ -23,6 +27,12 @@ CRITICAL CHRONOLOGY RULES:
    - Every event ID provided in the input MUST be included in the output.
 3. RATIONALE:
    - For every event, provide a 1-sentence `chronological_rationale` explaining why it occurs at this position in true chronology.
+"""
+
+MACRO_ERA_SYSTEM_PROMPT = """You are a master literary chronologist.
+You are given a list of narrative eras and story epochs extracted from a large document.
+Your task is to order these ERAS into their TRUE chronological sequence from earliest historical past/backstory to the final narrative resolution.
+Assign each era a strict integer `era_rank` (1 = earliest in history/past, N = final resolution).
 """
 
 
@@ -37,54 +47,38 @@ def _save_json_checkpoint(filename: str, data: dict) -> None:
         logger.warning(f"Failed to write checkpoint {filename}: {e}")
 
 
-def order_timeline_with_llm(
-    doc_id: str,
-    events: list[dict],
-    on_progress: Callable[[float, str], None] | None = None,
-) -> tuple[list[dict], list[str]]:
-    """
-    Feeds the full list of extracted events to the LLM to arrange them into
-    true story-world chronological sequence, replacing heuristic DAG logic.
-    """
-    if not events:
-        return [], []
-
-    if on_progress:
-        on_progress(0.85, "LLM arranging events into true chronological story order")
-
-    # Format all events for the LLM
-    event_blocks = []
-    for e in events:
-        actions_str = ""
-        if e.get("point_wise_actions"):
-            actions_str = " | Actions: " + "; ".join(
-                f"[p. {a['page_no']}] {a['action']}" for a in e["point_wise_actions"]
-            )
-        
-        timestamps_str = ", ".join(e.get("exact_dates_and_timestamps", [])) or "None"
-        rel_context = e.get("relative_time_context") or "N/A"
-        
-        block = (
-            f"- EVENT ID: {e['id']}\n"
-            f"  Name: {e['event_name']}\n"
-            f"  Classification: {e.get('classification', 'story_progression')}\n"
-            f"  Era / Period: {e.get('story_era', 'Present')}\n"
-            f"  Page Range: pp. {e['page_start']}-{e['page_end']}\n"
-            f"  Time Anchor: {e.get('temporal_anchor') or 'Not specified'}\n"
-            f"  Dates / Timestamps: {timestamps_str}\n"
-            f"  Relative Chronology: {rel_context}\n"
-            f"  Summary: {e['summary']}{actions_str}"
+def _format_event_card(e: dict) -> str:
+    """Generates a compact, high-signal event card optimized for LLM context limits."""
+    actions_str = ""
+    if e.get("point_wise_actions"):
+        # Select top 2-3 concise actions
+        actions_str = " | Actions: " + "; ".join(
+            f"[p.{a['page_no']}] {a['action'][:90]}" for a in e["point_wise_actions"][:3]
         )
-        event_blocks.append(block)
-
-    user_prompt = (
-        f"EXTRACTED EVENTS TO ORDER CHRONOLOGICALLY ({len(events)} total events):\n\n"
-        + "\n\n".join(event_blocks)
-        + "\n\nArrange all events above into their TRUE story-world chronological order from earliest past backstories/memories to the final resolution."
+    
+    timestamps_str = ", ".join(e.get("exact_dates_and_timestamps", [])) or "None"
+    rel_context = e.get("relative_time_context") or "N/A"
+    
+    return (
+        f"- EVENT ID: {e['id']}\n"
+        f"  Name: {e['event_name']}\n"
+        f"  Classification: {e.get('classification', 'story_progression')} | Era: {e.get('story_era', 'Present')}\n"
+        f"  Pages: pp. {e['page_start']}-{e['page_end']} | Time Anchor: {e.get('temporal_anchor') or 'None'}\n"
+        f"  Dates/Timestamps: {timestamps_str} | Context: {rel_context}\n"
+        f"  Summary: {e['summary'][:160]}{actions_str}"
     )
 
-    # Call LLM for global timeline ordering
-    ordering_result: GlobalTimelineOrderingResponse = llm.chat_structured(
+
+def _order_direct_batch(events: list[dict], batch_label: str = "all") -> dict[str, dict]:
+    """Orders a single batch (<= 30 events) using structured LLM response."""
+    event_blocks = [_format_event_card(e) for e in events]
+    user_prompt = (
+        f"EVENTS TO ORDER CHRONOLOGICALLY ({len(events)} events in batch '{batch_label}'):\n\n"
+        + "\n\n".join(event_blocks)
+        + "\n\nArrange all events above into their TRUE story-world chronological order from earliest to latest."
+    )
+
+    result: GlobalTimelineOrderingResponse = llm.chat_structured(
         system=ORDERING_SYSTEM_PROMPT,
         user=user_prompt,
         model_cls=GlobalTimelineOrderingResponse,
@@ -92,38 +86,162 @@ def order_timeline_with_llm(
         max_tokens=4000,
     )
 
-    # Save LLM ordering checkpoint to data/cache/
-    _save_json_checkpoint(
-        f"{doc_id}_checkpoint_global_llm_ordering.json",
-        ordering_result.model_dump(),
-    )
-
-    # Map the LLM's chronological rank back to the events
     rank_map = {}
-    for item in ordering_result.ordered_events:
+    for item in result.ordered_events:
         rank_map[item.event_id] = {
             "rank": item.chronological_rank,
             "period": item.story_time_period,
             "era": item.story_era,
             "rationale": item.chronological_rationale,
         }
+    return rank_map
 
-    id_to_event = {e["id"]: e for e in events}
+
+def _order_hierarchical(
+    doc_id: str,
+    events: list[dict],
+    on_progress: Callable[[float, str], None] | None = None,
+) -> dict[str, dict]:
+    """
+    Scalable hierarchical ordering for large documents (100-500+ pages / 50-300+ events):
+    1. Clusters events by story_era / narrative epoch.
+    2. Orders events within each era locally in parallel/batches.
+    3. Orders the eras globally via a macro-ordering prompt.
+    4. Stitches all batches into a single globally-ranked chronological timeline.
+    """
+    if on_progress:
+        on_progress(0.85, f"Hierarchical scaling: Grouping {len(events)} events into chronological eras")
+
+    # Group events by era
+    era_groups = defaultdict(list)
+    for e in events:
+        era = e.get("story_era") or "Present Storyline"
+        era_groups[era].append(e)
+
+    # 1. Order eras globally
+    distinct_eras = list(era_groups.keys())
+    era_list_str = "\n".join(
+        f"- Era: '{era}' ({len(era_groups[era])} events spanning pages {min(ev['page_start'] for ev in era_groups[era])}-{max(ev['page_end'] for ev in era_groups[era])})"
+        for era in distinct_eras
+    )
     
-    # Assign ranks (fall back to narrative order if missing)
+    macro_prompt = (
+        f"STORY ERAS IDENTIFIED ACROSS DOCUMENT ({len(distinct_eras)} total eras):\n\n"
+        + era_list_str
+        + "\n\nOrder these eras into their TRUE story-world chronological sequence from earliest historical past to final resolution."
+    )
+
+    macro_res: MacroEraOrderingResponse = llm.chat_structured(
+        system=MACRO_ERA_SYSTEM_PROMPT,
+        user=macro_prompt,
+        model_cls=MacroEraOrderingResponse,
+        temperature=0.1,
+        max_tokens=1500,
+    )
+
+    # Sort eras by LLM macro rank
+    ordered_era_names = [item.era_name for item in sorted(macro_res.ordered_eras, key=lambda x: x.era_rank)]
+    # Append any unranked eras safely
+    for era in distinct_eras:
+        if era not in ordered_era_names:
+            ordered_era_names.append(era)
+
+    # 2. Order events within each era
+    global_rank_map = {}
+    global_counter = 1
+
+    for era_name in ordered_era_names:
+        era_events = era_groups.get(era_name, [])
+        if not era_events:
+            continue
+
+        if on_progress:
+            on_progress(0.88, f"Ordering events in era: {era_name} ({len(era_events)} events)")
+
+        # Sub-batch if single era has more than 25 events
+        sub_batch_size = 25
+        for i in range(0, len(era_events), sub_batch_size):
+            chunk = era_events[i:i + sub_batch_size]
+            if len(chunk) == 1:
+                global_rank_map[chunk[0]["id"]] = {
+                    "rank": global_counter,
+                    "period": era_name,
+                    "era": era_name,
+                    "rationale": f"Sequential progression in era {era_name}.",
+                }
+                global_counter += 1
+            else:
+                batch_ranks = _order_direct_batch(chunk, batch_label=f"{era_name}_part_{i//sub_batch_size+1}")
+                # Sort chunk by local rank
+                sorted_chunk = sorted(chunk, key=lambda ev: batch_ranks.get(ev["id"], {}).get("rank", 999))
+                for ev in sorted_chunk:
+                    local_info = batch_ranks.get(ev["id"], {})
+                    global_rank_map[ev["id"]] = {
+                        "rank": global_counter,
+                        "period": local_info.get("period", era_name),
+                        "era": era_name,
+                        "rationale": local_info.get("rationale", f"Order in {era_name}"),
+                    }
+                    global_counter += 1
+
+    return global_rank_map
+
+
+def order_timeline_with_llm(
+    doc_id: str,
+    events: list[dict],
+    on_progress: Callable[[float, str], None] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """
+    Feeds extracted events to the LLM to arrange them into true story-world
+    chronological sequence. Automatically uses Direct Mode (<=30 events) or
+    Hierarchical Scaling Mode (>30 events) to prevent token overflow on large books.
+    """
+    if not events:
+        return [], []
+
+    if len(events) <= 30:
+        if on_progress:
+            on_progress(0.85, f"Arranging {len(events)} events into true chronological story order")
+        rank_map = _order_direct_batch(events, batch_label="global")
+    else:
+        rank_map = _order_hierarchical(doc_id, events, on_progress=on_progress)
+
+    # Assign ranks
     for i, e in enumerate(events):
         info = rank_map.get(e["id"])
         if info:
             e["topological_order"] = info["rank"]
-            e["story_time_period"] = info["period"]
+            e["story_time_period"] = info.get("period", "")
             e["story_era"] = info.get("era") or e.get("story_era", "Present")
-            e["chronological_rationale"] = info["rationale"]
+            e["chronological_rationale"] = info.get("rationale", "")
         else:
             e["topological_order"] = 1000 + i
 
-    # Sort events strictly by LLM's chronological rank
+    # Sort events strictly by assigned chronological rank
     events.sort(key=lambda x: x["topological_order"])
     topo_order = [e["id"] for e in events]
+
+    # Save LLM ordering checkpoint to data/cache/
+    _save_json_checkpoint(
+        f"{doc_id}_checkpoint_global_llm_ordering.json",
+        {
+            "doc_id": doc_id,
+            "mode": "direct" if len(events) <= 30 else "hierarchical",
+            "total_events": len(events),
+            "events_ordered": [
+                {
+                    "rank": e["topological_order"],
+                    "id": e["id"],
+                    "name": e["event_name"],
+                    "era": e.get("story_era", ""),
+                    "pages": f"{e['page_start']}-{e['page_end']}",
+                    "rationale": e.get("chronological_rationale", ""),
+                }
+                for e in events
+            ],
+        },
+    )
 
     # Construct single sequential forward timeline edges: (Rank 1) -> (Rank 2) -> ... -> (Rank N)
     edges: list[dict] = []
@@ -219,6 +337,7 @@ def fetch_graph(doc_id: str) -> dict:
                     "name": n.get("name", "Event"),
                     "summary": n.get("summary", ""),
                     "classification": n.get("classification", "story_progression"),
+                    "story_era": n.get("story_era", "Present"),
                     "pages": n.get("source_pages", []),
                     "page_start": n.get("page_start", 0),
                     "page_end": n.get("page_end", 0),

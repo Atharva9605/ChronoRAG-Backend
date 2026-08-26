@@ -25,10 +25,7 @@ class ExtractedEvent(BaseModel):
     story_era: str = Field(
         description=(
             "The story-world era/epoch when this event actually took place: "
-            "e.g., 'Deep Past (Youth & Africa Voyages)', 'Recent Past (Early Days with Manolin & Past Streaks)', "
-            "'Present Day 1 (Shore & Shack Preparation)', 'Present Day 2 (Rowing Out & Hooking Marlin)', "
-            "'Present Day 3 (The Marlin Battle & Endurance)', 'Present Day 4 (Shark Attacks & Return)', "
-            "'Present Day 5 (Aftermath on Shore)'."
+            "e.g., 'Deep Past', 'Recent Past', 'Present Act 1', 'Present Act 2', 'Resolution'."
         )
     )
     summary: str = Field(
@@ -49,10 +46,10 @@ class ExtractedEvent(BaseModel):
         description="Primary explicit time marker from text (e.g., 'September 1950', 'Years ago in youth', 'Morning of Day 1', '84 days ago')."
     )
     exact_dates_and_timestamps: list[str] = Field(
-        description="All explicit dates, calendar years, seasons, times of day (e.g. 'dawn', 'sunset', 'noon'), or durations (e.g. 'two hours later', 'for three days') mentioned."
+        description="All explicit dates, calendar years, seasons, times of day (e.g. 'dawn', 'sunset', 'noon'), or durations mentioned."
     )
     relative_time_context: str = Field(
-        description="Precise chronological placement relative to the surrounding story (e.g. 'Occurs the morning after the shack discussion', 'Occurred 20 years before the main story')."
+        description="Precise chronological placement relative to the surrounding story."
     )
     preceding_event_reference: str = Field(
         description="Reference or name of the prior event that directly preceded or caused this one. 'None' if starting event."
@@ -83,7 +80,7 @@ class RollingMemory(BaseModel):
 
 
 # ============================================================
-# Global LLM Timeline Ordering Models
+# Global & Hierarchical LLM Timeline Ordering Models
 # ============================================================
 class OrderedTimelineEventItem(BaseModel):
     event_id: str = Field(description="The unique ID of the event being placed.")
@@ -91,7 +88,7 @@ class OrderedTimelineEventItem(BaseModel):
         description="Strict sequential integer rank in true story time (1 = earliest in history/past, N = final resolution)."
     )
     story_era: str = Field(
-        description="Era category (e.g. 'Deep Past', 'Recent Past', 'Day 1 Shore', 'Day 2 Hook', 'Day 3 Battle', 'Day 4 Sharks', 'Day 5 Return')."
+        description="Era category (e.g. 'Deep Past', 'Recent Past', 'Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5')."
     )
     story_time_period: str = Field(
         description="Estimated story time period (e.g. 'Decades ago in Casablanca', 'Day 1 Morning', 'Day 3 Night')."
@@ -108,6 +105,17 @@ class GlobalTimelineOrderingResponse(BaseModel):
     ordered_events: list[OrderedTimelineEventItem] = Field(
         description="All events ordered strictly in true story-world chronological sequence."
     )
+
+
+class MacroEraItem(BaseModel):
+    era_name: str = Field(description="Name of the story era or narrative epoch.")
+    era_rank: int = Field(description="Sequential rank of this era (1 = earliest in past history, N = final resolution).")
+    era_description: str = Field(description="Brief 1-sentence summary of what occurs in this narrative era.")
+
+
+class MacroEraOrderingResponse(BaseModel):
+    chronological_flow: str = Field(description="High-level narrative progression from earliest era to resolution.")
+    ordered_eras: list[MacroEraItem] = Field(description="All eras strictly ordered in true historical/story-time sequence.")
 
 
 class TimelineGraphNode(BaseModel):
